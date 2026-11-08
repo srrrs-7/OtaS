@@ -49,6 +49,9 @@ pub enum SandboxMode {
     Landlock,
     /// 名前空間も使う（デーモンを root で動かす）。作業領域は OverlayFS で、`/data` として見える。
     Namespace,
+    /// 名前空間をユーザー名前空間の中で使う（デーモンを一般ユーザーで動かす）。
+    /// タスクはデーモンと同じユーザーで動くが、ケーパビリティは持たない。作業領域は `namespace` と同じ。
+    Rootless,
 }
 
 /// サンドボックスの設定。
@@ -170,7 +173,7 @@ impl Config {
     /// `namespace` のときのタスクのユーザーとグループ。
     pub fn task_owner(&self) -> Option<(u32, u32)> {
         match self.sandbox.mode {
-            SandboxMode::Landlock => None,
+            SandboxMode::Landlock | SandboxMode::Rootless => None,
             SandboxMode::Namespace => Some((self.sandbox.uid?, self.sandbox.gid?)),
         }
     }

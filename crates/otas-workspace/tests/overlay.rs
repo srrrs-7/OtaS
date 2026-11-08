@@ -28,17 +28,19 @@ fn seed(root: &Path) {
 }
 
 /// 作業領域を OverlayFS としてマウントし、`edit` を実行してから外す（エージェントの代わり）。
-fn edit_through_overlay(source: &MountSource, edit: impl FnOnce(&Path)) {
+/// `userxattr` は root なしの方式（ユーザー名前空間）と同じく、印を user.overlay.* に付ける。
+fn edit_through_overlay(source: &MountSource, userxattr: bool, edit: impl FnOnce(&Path)) {
     let MountSource::Overlay { lower, upper, work } = source else {
         panic!("OverlayFS の作業領域ではない: {source:?}");
     };
     let merged = std::env::temp_dir().join(format!("otas-merged-{}", TaskId::new()));
     fs::create_dir_all(&merged).unwrap();
     let options = format!(
-        "lowerdir={},upperdir={},workdir={},redirect_dir=off,metacopy=off,index=off,xino=off",
+        "lowerdir={},upperdir={},workdir={},redirect_dir=nofollow,metacopy=off,index=off,xino=off{}",
         lower.display(),
         upper.display(),
-        work.display()
+        work.display(),
+        if userxattr { ",userxattr" } else { "" }
     );
     mount(
         Some("overlay"),
@@ -60,7 +62,7 @@ fn write_view(path: &str) -> ViewSpec {
     }
 }
 
-fn exercise(root: PathBuf, versions: VersionBackend) {
+fn exercise(root: PathBuf, versions: VersionBackend, userxattr: bool) {
     if versions == VersionBackend::Btrfs {
         // Btrfs では、正本はサブボリュームとして用意しておく（普通のディレクトリは受け付けない）
         fs::create_dir_all(&root).unwrap();
@@ -85,7 +87,7 @@ fn exercise(root: PathBuf, versions: VersionBackend) {
 
     let task = TaskId::new();
     let view = store.begin(task, &write_view("/data/projects/a")).unwrap();
-    edit_through_overlay(&view.entries[0].source, |merged| {
+    edit_through_overlay(&view.entries[0].source, userxattr, |merged| {
         fs::write(merged.join("notes.md"), "v2").unwrap();
         fs::remove_file(merged.join("old.md")).unwrap();
         fs::write(merged.join("new.md"), "新規").unwrap();
@@ -139,7 +141,7 @@ fn overlay_workspaces_commit_edits_deletions_and_replaced_directories() {
         return;
     }
     let root = std::env::temp_dir().join(format!("otas-ovl-{}", TaskId::new()));
-    exercise(root, VersionBackend::Hardlink);
+    exercise(root, VersionBackend::Hardlink, false);
 }
 
 #[test]
@@ -149,7 +151,7 @@ fn btrfs_versions_are_read_only_snapshots() {
         return;
     };
     let root = PathBuf::from(dir).join(format!("otas-btrfs-{}", TaskId::new()));
-    exercise(root.clone(), VersionBackend::Btrfs);
+    exercise(root.clone(), VersionBackend::Btrfs, false);
 
     let store = FsStore::open_with(
         &root,
@@ -164,4 +166,15 @@ fn btrfs_versions_are_read_only_snapshots() {
     // 版は読み取り専用のスナップショットなので、root でも書き換えられない
     let err = fs::write(root.join("versions/1/projects/a/notes.md"), "改ざん").unwrap_err();
     assert_eq!(err.raw_os_error(), Some(30), "EROFS のはず: {err}");
+}
+
+#[test]
+fn overlay_changes_marked_with_user_xattrs_are_read_too() {
+    // root なしの方式では、opaque の印が user.overlay.opaque に付く
+    if !privileged() {
+        eprintln!("特権を足したテスト用のコンテナでだけ動かします（OTAS_TEST_PRIVILEGED=1）");
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("otas-ws-userxattr-{}", TaskId::new()));
+    exercise(root, VersionBackend::Hardlink, true);
 }

@@ -88,8 +88,8 @@ pub fn exec_sandboxed(plan: &LaunchPlan) -> Result<Infallible, String> {
     death_signal()?;
     apply_limits(&plan.limits)?;
 
-    if plan.namespace.is_some() {
-        namespace::unshare_all()?;
+    if let Some(ns) = &plan.namespace {
+        namespace::unshare_all(ns.rootless)?;
         let me =
             std::env::current_exe().map_err(|e| format!("起動役のパスを取得できません: {e}"))?;
         let json = serde_json::to_string(plan).map_err(|e| e.to_string())?;
@@ -108,6 +108,11 @@ pub fn exec_sandboxed(plan: &LaunchPlan) -> Result<Infallible, String> {
         "{} を実行できませんでした: {error}",
         plan.program.display()
     ))
+}
+
+/// root なしの方式（ユーザー名前空間）を使えるか確かめる。起動役の `--probe-userns` で、捨てるプロセスの中で呼ぶ。
+pub fn probe_userns() -> Result<(), String> {
+    namespace::probe_userns()
 }
 
 /// 名前空間の中の起動役（2段目）。PID 名前空間の PID 1 として動く。

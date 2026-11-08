@@ -20,7 +20,7 @@ serde_json.workspace = true
 landlock = "0.4"
 libc = "0.2"
 nix = { version = "0.31", features = ["mount", "sched", "user", "fs", "process"] }
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["process", "fs", "thread"] }
 seccompiler = "0.5"
 
 [dev-dependencies]

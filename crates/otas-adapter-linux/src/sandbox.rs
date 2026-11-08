@@ -60,6 +60,7 @@ pub struct LinuxSandbox {
     launcher: PathBuf,
     system: Vec<PlanFsRule>,
     namespace: Option<NamespaceConfig>,
+    rootless: bool,
     cgroups: Option<Arc<CgroupManager>>,
 }
 
@@ -78,8 +79,46 @@ impl LinuxSandbox {
             launcher,
             system: system_rules(),
             namespace: None,
+            rootless: false,
             cgroups: None,
         })
+    }
+
+    /// root なしで名前空間を使う方式で作る（ユーザー名前空間）。デーモンは一般ユーザーで動かせる。
+    ///
+    /// タスクは外から見るとデーモンと同じユーザーで動くが、ケーパビリティはすべて捨てる。
+    /// 許可していないパスは、root の方式と同じくサンドボックスの中に存在しない。
+    /// この環境でユーザー名前空間を作れなければ（AppArmor の制限など）、理由を添えて断る。
+    pub fn detect_rootless(
+        launcher: impl Into<PathBuf>,
+        run_dir: impl Into<PathBuf>,
+    ) -> Result<Self, SandboxError> {
+        let mut sandbox = Self::detect(launcher)?;
+        let probe = Command::new(&sandbox.launcher)
+            .arg("--probe-userns")
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output()?;
+        if !probe.status.success() {
+            return Err(SandboxError::Unsupported(format!(
+                "root なしの方式を使えません: {}",
+                String::from_utf8_lossy(&probe.stderr).trim()
+            )));
+        }
+        let run_dir = run_dir.into();
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&run_dir)?;
+        sandbox.namespace = Some(NamespaceConfig {
+            uid: 0,
+            gid: 0,
+            run_dir,
+        });
+        sandbox.rootless = true;
+        Ok(sandbox)
     }
 
     /// cgroups v2 で資源の上限（メモリ・プロセス数・CPU）をかけられるようにする。
@@ -169,6 +208,7 @@ impl LinuxSandbox {
                     uid: config.uid,
                     gid: config.gid,
                     mounts,
+                    rootless: self.rootless,
                 })
             }
         };

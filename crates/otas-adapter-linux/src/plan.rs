@@ -119,7 +119,11 @@ pub struct PlanMount {
     pub writable: bool,
 }
 
-/// 名前空間を使う場合の計画（起動役は root で動き、準備が終わったら `uid` / `gid` に切り替える）。
+/// 名前空間を使う場合の計画。
+///
+/// - root の方式：起動役は root で動き、準備が終わったら `uid` / `gid` に切り替える。
+/// - root なしの方式（`rootless`）：起動役はユーザー名前空間を作り、その中の root（外から見るとデーモンと同じユーザー）
+///   として準備をし、終わったらケーパビリティをすべて捨てる。`uid` / `gid` は使わない。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespacePlan {
     /// 新しいルートを組み立てる空のディレクトリ（ホストのパス）。
@@ -130,4 +134,7 @@ pub struct NamespacePlan {
     pub gid: u32,
     /// 別のパスに見せるもの（`fs` の規則は同じパスで見せる）。
     pub mounts: Vec<PlanMount>,
+    /// ユーザー名前空間を使い、root なしで動かすか。
+    #[serde(default)]
+    pub rootless: bool,
 }

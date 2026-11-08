@@ -235,9 +235,14 @@ fn is_whiteout(meta: &fs::Metadata) -> bool {
 }
 
 /// OverlayFS で、下の層の中身を隠すディレクトリ（opaque）か。
+/// root の方式では trusted.overlay.opaque、root なしの方式（userxattr）では user.overlay.opaque に印が付く。
 fn is_opaque(path: &Path) -> bool {
-    let mut buf = [0u8; 8];
-    rustix::fs::lgetxattr(path, "trusted.overlay.opaque", &mut buf).is_ok_and(|n| &buf[..n] == b"y")
+    ["trusted.overlay.opaque", "user.overlay.opaque"]
+        .iter()
+        .any(|name| {
+            let mut buf = [0u8; 8];
+            rustix::fs::lgetxattr(path, *name, &mut buf).is_ok_and(|n| &buf[..n] == b"y")
+        })
 }
 
 fn btrfs(args: &[&std::ffi::OsStr]) -> Result<(), WorkspaceError> {

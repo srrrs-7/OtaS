@@ -1,0 +1,21 @@
+# OtaS の起動役に、特権のないユーザー名前空間を許可する AppArmor プロファイル。
+#
+# Ubuntu 23.10 以降は kernel.apparmor_restrict_unprivileged_userns=1 が既定で、
+# プロファイルのないプログラムはユーザー名前空間の中でケーパビリティを持てない。
+# root なしの方式（[sandbox] mode = "rootless"）を使うときだけ必要。
+#
+# 入れ方（パスはインストール先に合わせる）:
+#   sudo install -m 0644 packaging/apparmor/otas-sandbox-exec /etc/apparmor.d/otas-sandbox-exec
+#   sudo apparmor_parser -r /etc/apparmor.d/otas-sandbox-exec
+#
+# 許可するのはユーザー名前空間の作成だけ。ファイル・ネットワーク・システムコールの制限は
+# 起動役自身（Landlock・seccomp・名前空間）がかける。
+
+abi <abi/4.0>,
+include <tunables/global>
+
+profile otas-sandbox-exec /usr/lib/otas/otas-sandbox-exec flags=(unconfined) {
+  userns,
+
+  include if exists <local/otas-sandbox-exec>
+}

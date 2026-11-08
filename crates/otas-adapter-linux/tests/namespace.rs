@@ -301,3 +301,114 @@ fn cgroup_limits_without_cgroups_are_refused() {
         Err(SandboxError::InvalidSpec(_))
     ));
 }
+
+// ---- root なしの方式（ユーザー名前空間） ----
+//
+// この開発環境の VM は AppArmor で特権のないユーザー名前空間を制限しているため、
+// 一般ユーザーからは使えない（下の probe のテストで、その理由が説明されることを確かめる）。
+// 特権のコンテナでは root から同じ経路（ユーザー名前空間 → ケーパビリティを捨てる）を通して確かめる。
+
+fn rootless_sandbox() -> LinuxSandbox {
+    LinuxSandbox::detect_rootless(env!("CARGO_BIN_EXE_otas-sandbox-exec"), temp_dir("run"))
+        .expect("root なしの方式を使えません")
+}
+
+#[test]
+fn rootless_is_refused_with_a_reason_when_user_namespaces_are_unavailable() {
+    if privileged() {
+        return;
+    }
+    match LinuxSandbox::detect_rootless(env!("CARGO_BIN_EXE_otas-sandbox-exec"), temp_dir("run")) {
+        Err(SandboxError::Unsupported(reason)) => {
+            assert!(reason.contains("root なしの方式を使えません"), "{reason}")
+        }
+        Ok(_) => eprintln!("この環境ではユーザー名前空間を使える"),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+#[test]
+fn rootless_tasks_hold_no_capabilities() {
+    require_privileged!();
+    let r = run(
+        &rootless_sandbox(),
+        sh(
+            "echo $$; cat /proc/self/uid_map; grep -E '^Cap(Inh|Prm|Eff|Bnd|Amb)' /proc/self/status",
+        ),
+    );
+    assert!(r.ok, "{}", r.stderr);
+    let mut lines = r.stdout.lines();
+    assert_eq!(lines.next(), Some("2"), "{}", r.stdout);
+    // 中の 0 が、外のデーモンのユーザーに対応づけられている
+    let map: Vec<u32> = lines
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .map(|n| n.parse().unwrap())
+        .collect();
+    assert_eq!(map, vec![0, rustix::process::geteuid().as_raw(), 1]);
+    let caps: Vec<&str> = lines.collect();
+    assert_eq!(caps.len(), 5, "{}", r.stdout);
+    for line in caps {
+        assert!(
+            line.ends_with("0000000000000000"),
+            "ケーパビリティが残っている: {line}"
+        );
+    }
+}
+
+#[test]
+fn rootless_tasks_see_only_what_was_granted() {
+    require_privileged!();
+    let r = run(
+        &rootless_sandbox(),
+        sh(
+            "test -e /etc/passwd && echo passwd; test -e /root && echo root; \
+            echo x > /x 2>/dev/null && echo rootfs-writable; \
+            ls /sys/class/net 2>/dev/null | grep -v '^lo$' | head -1; echo end",
+        ),
+    );
+    assert!(r.ok, "{}", r.stderr);
+    assert_eq!(r.stdout.trim(), "end", "{}", r.stdout);
+}
+
+#[test]
+fn rootless_overlay_records_changes_with_user_xattrs() {
+    require_privileged!();
+    let lower = temp_dir("lower");
+    std::fs::write(lower.join("notes.md"), "v1").unwrap();
+    std::fs::write(lower.join("old.md"), "古い").unwrap();
+    std::fs::create_dir(lower.join("dir")).unwrap();
+    std::fs::write(lower.join("dir/a.md"), "a").unwrap();
+    let upper = temp_dir("upper");
+    let work = temp_dir("work");
+
+    let mut spec = sh("echo v2 > /data/p/notes.md && rm /data/p/old.md \
+         && rm -r /data/p/dir && mkdir /data/p/dir && echo b > /data/p/dir/b.md");
+    spec.mounts = vec![Mount {
+        target: "/data/p".into(),
+        source: MountSource::Overlay {
+            lower: lower.clone(),
+            upper: upper.clone(),
+            work,
+        },
+        writable: true,
+    }];
+    let r = run(&rootless_sandbox(), spec);
+    assert!(r.ok, "{}", r.stderr);
+
+    assert_eq!(
+        std::fs::read_to_string(lower.join("notes.md")).unwrap(),
+        "v1"
+    );
+    assert_eq!(
+        std::fs::read_to_string(upper.join("notes.md")).unwrap(),
+        "v2\n"
+    );
+    let whiteout = std::fs::symlink_metadata(upper.join("old.md")).unwrap();
+    assert!(whiteout.file_type().is_char_device() && whiteout.rdev() == 0);
+    // 作り直したディレクトリは、user.overlay.opaque で下の層を隠す
+    let mut buf = [0u8; 8];
+    let n = rustix::fs::lgetxattr(upper.join("dir"), "user.overlay.opaque", &mut buf).unwrap();
+    assert_eq!(&buf[..n], b"y");
+}

@@ -548,3 +548,42 @@ otasd ─ spawn ─> otas-sandbox-exec <計画>          1段目：cgroup に入
 - cgroup の上限を求められたのに cgroup が設定されていなければ、黙って無視せず `InvalidSpec` で断る（rlimit で代わりにできるのはプロセスごとの上限だけで、タスク全体の上限にはならないため）。
 
 テストでは `scripts/test-privileged.sh` がコンテナの cgroup のプロセスを `init` に移し、子で memory・pids・cpu を使えるようにしてから、PID 名前空間（`$$` が 2）、プロセス数の上限、メモリの上限（16MB の上限で 64MB を確保させる）を確かめる。
+
+## 18. 実装メモ：root なしの方式（ユーザー名前空間）
+
+`[sandbox] mode = "rootless"`（`LinuxSandbox::detect_rootless`）では、デーモンを一般ユーザーで動かしたまま、`namespace` と同じ隔離（許可したものだけを置いたルート・空のネットワーク・PID 名前空間・OverlayFS の作業領域）を使う。
+
+```text
+otasd（uid H）─> 起動役 1段目：unshare(NEWUSER|NEWNS|NEWNET|NEWIPC|NEWUTS|NEWPID)
+                  setgroups=deny、uid_map「0 H 1」、gid_map「0 G 1」（中の root = 外の H）
+                  └─> 起動役 2段目（PID 1）：build_root → ケーパビリティをすべて捨てる → Landlock・seccomp
+                        └─> 対象のプログラム（中では uid 0、外では H、ケーパビリティなし）
+```
+
+### ケーパビリティの捨て方
+
+ユーザー名前空間の中には uid 0 しかないので、一般ユーザーに切り替えられない。uid 0 のプロセスは exec のたびにケーパビリティを得直すため、次の順にすべて塞ぐ。
+
+1. securebits：`NO_ROOT`・`NO_SETUID_FIXUP`・`NO_CAP_AMBIENT_RAISE` とそのロック、`KEEP_CAPS_LOCKED`
+2. bounding set を空にする
+3. ambient を空にする
+4. effective・permitted・inheritable を空にする
+
+テストで `/proc/self/status` の `CapInh`・`CapPrm`・`CapEff`・`CapBnd`・`CapAmb` がすべて 0 であることを確かめる。
+
+### ユーザー名前空間ゆえの違い
+
+- **OverlayFS**：`trusted.*` の拡張属性を使えないので `userxattr` を付け、印は `user.overlay.*` に付く。作業領域の差分は `trusted.overlay.opaque` と `user.overlay.opaque` の両方を読む。`redirect_dir=off`（作らないが、たどる）は `userxattr` と両立しないため、両方の方式で `nofollow` にした。
+- **bind mount**：元のマウントの制限（ro・nosuid・nodev・noexec・atime）はロックされていて外せないので、`statvfs` で読んで引き継ぐ（root の方式でも元より緩めないために引き継ぐ）。
+- **タスクのユーザー**：外から見るとデーモンと同じユーザーで動く。デーモンの状態ディレクトリなどは、マウントの名前空間に置かないこと（存在しない）と Landlock で守る。デーモンのプロセスは PID 名前空間の外なので見えない。
+- **作業領域の持ち主**：タスクはデーモンと同じユーザーなので、`chown` は不要（`task_owner` は `None`）。
+
+### 使えない環境
+
+Ubuntu 23.10 以降は `kernel.apparmor_restrict_unprivileged_userns=1` が既定で、プロファイルのないプログラムはユーザー名前空間の中でケーパビリティを持てない（`uid_map` を書けない）。`detect_rootless` は起動役の `--probe-userns` で確かめ、使えなければ理由（AppArmor の制限なら、その旨とプロファイルの場所）を添えて断る。制限なしでは動かさない。
+
+許可には `packaging/apparmor/otas-sandbox-exec`（起動役にだけ `userns` を許すプロファイル）を入れる。システム全体の sysctl を変える必要はない。
+
+### テスト
+
+開発用の VM も AppArmor の制限が有効なので、一般ユーザーからは使えない（`dev` のテストで、理由を添えて断ることを確かめる）。`dev-privileged` では root から同じ経路（ユーザー名前空間 → ケーパビリティを捨てる）を通し、PID 名前空間・uid_map・ケーパビリティが空であること・許可していないパスが見えないこと・`user.overlay.*` の印（whiteout と opaque）を確かめる。

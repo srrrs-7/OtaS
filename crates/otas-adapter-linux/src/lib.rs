@@ -22,6 +22,13 @@
 //! 許可していないパスはサンドボックスの中に存在せず、作業領域は `/data` として見える。
 //! OverlayFS の作業領域（書いたときだけコピー）もこの方式で使える。
 //!
+//! # root なしの方式（[`LinuxSandbox::detect_rootless`]）
+//!
+//! デーモンを一般ユーザーで動かす場合は、ユーザー名前空間を作り、その中の root として同じ準備をする。
+//! 外から見るとタスクはデーモンと同じユーザーで動くが、ケーパビリティはすべて捨て、二度と得られないようにする。
+//! Ubuntu 23.10 以降では、AppArmor で起動役にユーザー名前空間を許可する必要がある
+//! （`packaging/apparmor/otas-sandbox-exec`）。
+//!
 //! # 保証の申告
 //!
 //! - ファイルの隔離：Strong（Landlock がカーネルで強制する）
@@ -42,7 +49,7 @@ mod sandbox;
 mod seccomp_filter;
 
 pub use cgroup::CgroupManager;
-pub use launch::{exec_sandboxed, run_pid1};
+pub use launch::{exec_sandboxed, probe_userns, run_pid1};
 pub use plan::{
     LaunchPlan, NamespacePlan, PlanAccess, PlanFsRule, PlanLimits, PlanMount, PlanMountSource,
 };

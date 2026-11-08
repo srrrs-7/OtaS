@@ -168,6 +168,7 @@ pub fn sandbox_from_config(config: &Config) -> Result<Arc<dyn Sandbox>, DaemonEr
     use otas_adapter_linux::{LinuxSandbox, NamespaceConfig};
     let sandbox = match config.sandbox.mode {
         SandboxMode::Landlock => LinuxSandbox::detect(&config.launcher)?,
+        SandboxMode::Rootless => LinuxSandbox::detect_rootless(&config.launcher, config.run_dir())?,
         SandboxMode::Namespace => {
             let (uid, gid) = config.task_owner().ok_or_else(|| {
                 DaemonError::Config("namespace では [sandbox] の uid と gid が必要です".into())
