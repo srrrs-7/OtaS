@@ -108,7 +108,18 @@ interface Console {
   # 正本を指定した版に戻す。結果（JSON）は新しい版。
   rollback @7 (version :UInt64) -> (resultJson :Text);
 
-  # タスクの標準出力を offset バイト目から読む。next は次に読む位置。
-  # 行の途中では切らない（完全な行だけを返す）。
-  output @8 (taskId :Text, offset :UInt64) -> (text :Text, next :UInt64);
+  # タスクの経過を listener に知らせ始める。
+  # 最初にそれまでの出力と承認待ちを送り、その後は起きたときに送る。最後に finished を送って終わる。
+  # 承認待ちは2回届くことがある（ID で重複を除く）。
+  watch @8 (taskId :Text, listener :TaskListener) -> ();
+}
+
+# タスクの経過を受け取る側（人間向けの画面が実装する）。
+interface TaskListener {
+  # エージェントの標準出力（完全な行だけ。1回に複数行のことがある）。
+  output @0 (lines :Text) -> ();
+  # 承認待ちができた。
+  approval @1 (item :PendingApproval) -> ();
+  # タスクが終わった（状態の JSON）。これが最後の知らせ。
+  finished @2 (statusJson :Text) -> ();
 }

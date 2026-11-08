@@ -2,7 +2,9 @@
 
 use crate::IpcError;
 use crate::convert::{label_to_wire, read_labels, role_to_wire, text};
-use crate::otas_capnp::{approver, call_result, console, task_session};
+use crate::otas_capnp::{
+    approver, call_result, console, pending_approval, task_listener, task_session,
+};
 use capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty};
 use otas_ports::{InferRequest, InferResponse, ModelCaps, ToolSpec};
 use otas_types::{Action, ApprovalId, GrantSet, LabelSet, TaskId};
@@ -156,14 +158,20 @@ impl ConsoleClient {
         )?)?)
     }
 
-    /// タスクの標準出力を `offset` バイト目から読む。読んだ文字列と、次に読む位置を返す。
-    pub async fn output(&self, task: TaskId, offset: u64) -> Result<(String, u64), IpcError> {
-        let mut req = self.cap.output_request();
+    /// タスクの経過を受け取り始める。最初にそれまでの出力と承認待ちが届き、
+    /// 最後に [`WatchEvent::Finished`] が届く。承認待ちは2回届くことがある（ID で重複を除く）。
+    /// `LocalSet` の中で呼ぶ必要がある。
+    pub async fn watch(
+        &self,
+        task: TaskId,
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<WatchEvent>, IpcError> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let listener: task_listener::Client = capnp_rpc::new_client(Listener { tx });
+        let mut req = self.cap.watch_request();
         req.get().set_task_id(task.0.to_string());
-        req.get().set_offset(offset);
-        let response = req.send().promise.await?;
-        let r = response.get()?;
-        Ok((text(r.get_text()?)?, r.get_next()))
+        req.get().set_listener(listener);
+        req.send().promise.await?;
+        Ok(rx)
     }
 
     /// 承認の窓口。
@@ -325,6 +333,74 @@ impl TaskClient {
     }
 }
 
+/// タスクの経過の知らせ（[`ConsoleClient::watch`]）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum WatchEvent {
+    /// エージェントの標準出力（完全な行だけ）。
+    Output(String),
+    /// 承認待ちができた。
+    Approval(PendingItem),
+    /// タスクが終わった（状態）。これが最後の知らせ。
+    Finished(serde_json::Value),
+}
+
+/// デーモンからの知らせを受け取り、チャネルに流す。
+struct Listener {
+    tx: tokio::sync::mpsc::UnboundedSender<WatchEvent>,
+}
+
+impl Listener {
+    fn forward(&self, event: WatchEvent) -> Result<(), capnp::Error> {
+        // 受け取る側がもういなければ、デーモンに伝えて送るのをやめてもらう
+        self.tx
+            .send(event)
+            .map_err(|_| capnp::Error::disconnected("受け取る側が終わりました".into()))
+    }
+}
+
+impl task_listener::Server for Listener {
+    async fn output(
+        self: capnp::capability::Rc<Self>,
+        params: task_listener::OutputParams,
+        _results: task_listener::OutputResults,
+    ) -> Result<(), capnp::Error> {
+        let lines = text(params.get()?.get_lines()?).map_err(protocol)?;
+        self.forward(WatchEvent::Output(lines))
+    }
+
+    async fn approval(
+        self: capnp::capability::Rc<Self>,
+        params: task_listener::ApprovalParams,
+        _results: task_listener::ApprovalResults,
+    ) -> Result<(), capnp::Error> {
+        let item = read_pending(params.get()?.get_item()?).map_err(protocol)?;
+        self.forward(WatchEvent::Approval(item))
+    }
+
+    async fn finished(
+        self: capnp::capability::Rc<Self>,
+        params: task_listener::FinishedParams,
+        _results: task_listener::FinishedResults,
+    ) -> Result<(), capnp::Error> {
+        let status = text(params.get()?.get_status_json()?).map_err(protocol)?;
+        let status = serde_json::from_str(&status).map_err(protocol)?;
+        self.forward(WatchEvent::Finished(status))
+    }
+}
+
+fn protocol(e: impl std::fmt::Display) -> capnp::Error {
+    capnp::Error::failed(e.to_string())
+}
+
+fn read_pending(item: pending_approval::Reader<'_>) -> Result<PendingItem, IpcError> {
+    Ok(PendingItem {
+        id: ApprovalId(parse_uuid(&text(item.get_id()?)?)?),
+        task: TaskId(parse_uuid(&text(item.get_task()?)?)?),
+        action: serde_json::from_str(&text(item.get_action()?)?)?,
+        reason: text(item.get_reason()?)?,
+    })
+}
+
 /// 承認待ちの1件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingItem {
@@ -350,12 +426,7 @@ impl ApproverClient {
         let response = self.cap.pending_request().send().promise.await?;
         let mut items = Vec::new();
         for item in response.get()?.get_items()?.iter() {
-            items.push(PendingItem {
-                id: ApprovalId(parse_uuid(&text(item.get_id()?)?)?),
-                task: TaskId(parse_uuid(&text(item.get_task()?)?)?),
-                action: serde_json::from_str(&text(item.get_action()?)?)?,
-                reason: text(item.get_reason()?)?,
-            });
+            items.push(read_pending(item)?);
         }
         Ok(items)
     }

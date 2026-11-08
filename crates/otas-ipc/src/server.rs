@@ -1,10 +1,14 @@
 //! サーバ側（ブローカーを公開する側）。
 
 use crate::convert::{read_labels, role_from_wire, text, write_labels};
-use crate::otas_capnp::{approver, call_result, console, task_session};
+use crate::otas_capnp::{
+    approver, call_result, console, pending_approval, task_listener, task_session,
+};
 use capnp::capability::Rc;
 use capnp_rpc::{CapabilityServerSet, RpcSystem, rpc_twoparty_capnp, twoparty};
-use otas_broker::{ApprovalState, Broker, BrokerError, CallResult, Completed, Resolution};
+use otas_broker::{
+    ApprovalState, Broker, BrokerError, CallResult, Completed, PendingApproval, Resolution,
+};
 use otas_ports::{InferRequest, Message};
 use otas_types::{ApprovalId, GrantSet, TaskId};
 use std::cell::RefCell;
@@ -252,6 +256,17 @@ fn completed_json(done: Completed) -> Result<String, serde_json::Error> {
     }
 }
 
+fn write_pending(
+    mut b: pending_approval::Builder<'_>,
+    item: &PendingApproval,
+) -> capnp::Result<()> {
+    b.set_id(item.id.0.to_string());
+    b.set_task(item.task.0.to_string());
+    b.set_action(serde_json::to_string(&item.action).map_err(failed)?);
+    b.set_reason(&item.reason);
+    Ok(())
+}
+
 struct ApproverImpl {
     broker: Arc<Broker>,
 }
@@ -271,11 +286,7 @@ impl approver::Server for ApproverImpl {
         let items = self.broker.pending();
         let mut list = results.get().init_items(items.len() as u32);
         for (i, item) in items.iter().enumerate() {
-            let mut b = list.reborrow().get(i as u32);
-            b.set_id(item.id.0.to_string());
-            b.set_task(item.task.0.to_string());
-            b.set_action(serde_json::to_string(&item.action).map_err(failed)?);
-            b.set_reason(&item.reason);
+            write_pending(list.reborrow().get(i as u32), item)?;
         }
         Ok(())
     }
@@ -356,8 +367,23 @@ pub trait ConsoleBackend {
     fn versions(&self) -> Result<String, String>;
     /// 正本を指定した版に戻す（結果の JSON）。
     fn rollback(&self, version: u64) -> Result<String, String>;
-    /// タスクの標準出力を `offset` バイト目から読む。読んだ文字列と、次に読む位置を返す。
-    fn output(&self, task: TaskId, offset: u64) -> Result<(String, u64), String>;
+    /// タスクの経過を知らせ始める。最初にそれまでの出力と承認待ちを、
+    /// 最後に [`TaskEvent::Finished`] を送る（送った後は何も送らない）。
+    fn watch(
+        &self,
+        task: TaskId,
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<TaskEvent>, String>;
+}
+
+/// タスクの経過の知らせ。
+#[derive(Debug, Clone, PartialEq)]
+pub enum TaskEvent {
+    /// エージェントの標準出力（完全な行だけ）。
+    Output(String),
+    /// 承認待ちができた。
+    Approval(PendingApproval),
+    /// タスクが終わった（状態の JSON）。
+    Finished(String),
 }
 
 fn parse_task(id: &str) -> capnp::Result<TaskId> {
@@ -462,21 +488,49 @@ impl console::Server for ConsoleImpl {
         Ok(())
     }
 
-    async fn output(
+    async fn watch(
         self: Rc<Self>,
-        params: console::OutputParams,
-        mut results: console::OutputResults,
+        params: console::WatchParams,
+        _results: console::WatchResults,
     ) -> Result<(), capnp::Error> {
-        let (task, offset) = {
+        let (task, listener) = {
             let p = params.get()?;
-            (parse_task(&text(p.get_task_id()?)?)?, p.get_offset())
+            (parse_task(&text(p.get_task_id()?)?)?, p.get_listener()?)
         };
-        let (out, next) = self.backend.output(task, offset).map_err(failed)?;
-        let mut r = results.get();
-        r.set_text(out);
-        r.set_next(next);
+        let mut events = self.backend.watch(task).map_err(failed)?;
+        // 知らせは順に1つずつ送る（相手が受け取ってから次を送るので、順序が入れ替わらない）
+        tokio::task::spawn_local(async move {
+            while let Some(event) = events.recv().await {
+                let last = matches!(event, TaskEvent::Finished(_));
+                if send_event(&listener, event).await.is_err() || last {
+                    // 相手が切断した、または最後の知らせを送った
+                    break;
+                }
+            }
+        });
         Ok(())
     }
+}
+
+async fn send_event(listener: &task_listener::Client, event: TaskEvent) -> capnp::Result<()> {
+    match event {
+        TaskEvent::Output(lines) => {
+            let mut req = listener.output_request();
+            req.get().set_lines(lines);
+            req.send().promise.await?;
+        }
+        TaskEvent::Approval(item) => {
+            let mut req = listener.approval_request();
+            write_pending(req.get().init_item(), &item)?;
+            req.send().promise.await?;
+        }
+        TaskEvent::Finished(status) => {
+            let mut req = listener.finished_request();
+            req.get().set_status_json(status);
+            req.send().promise.await?;
+        }
+    }
+    Ok(())
 }
 
 /// 人間向けの窓口を公開する。接続元の確認（[`crate::verify_peer_uid`]）は、呼び出す前に済ませておく。

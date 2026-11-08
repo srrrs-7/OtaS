@@ -20,7 +20,7 @@ use otas_types::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 /// ブローカーのエラー。
 #[derive(Debug, thiserror::Error)]
@@ -130,6 +130,9 @@ pub enum ApprovalState {
     Resolved(Resolution),
 }
 
+/// 承認待ちができたときに呼ばれる関数。ブローカーのロックの外で呼ぶ。
+pub type PendingListener = Arc<dyn Fn(&PendingApproval) + Send + Sync>;
+
 /// 人間に見せる承認待ちの一覧の1件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingApproval {
@@ -227,6 +230,7 @@ impl BrokerBuilder {
             models: self.models,
             state: Mutex::new(State::default()),
             resolutions: Mutex::new(HashMap::new()),
+            on_pending: OnceLock::new(),
             store: self.store,
         }
     }
@@ -244,6 +248,7 @@ pub struct Broker {
     /// タスクが受け取るまで残す（保存はしない。デーモンが止まればエージェントも止まるため）。
     /// ロックの順序は `state` → `resolutions`。
     resolutions: Mutex<HashMap<ApprovalId, (TaskId, Option<Resolution>)>>,
+    on_pending: OnceLock<PendingListener>,
     store: Option<Arc<dyn StateStore>>,
 }
 
@@ -521,6 +526,12 @@ impl Broker {
     // 承認
     // -----------------------------------------------------------------------
 
+    /// 承認待ちができたときに呼ぶ関数を設定する（1回だけ。2回目以降は無視する）。
+    /// 人間向けの画面に、承認待ちをすぐに知らせるために使う。
+    pub fn set_pending_listener(&self, listener: PendingListener) {
+        let _ = self.on_pending.set(listener);
+    }
+
     /// 承認待ちの一覧を返す。
     pub fn pending(&self) -> Vec<PendingApproval> {
         self.state()
@@ -768,11 +779,20 @@ impl Broker {
                         task,
                         action: action.clone(),
                         effect,
-                        reason,
+                        reason: reason.clone(),
                         op: op(),
                     },
                 );
                 self.persist(&state)?;
+                drop(state);
+                if let Some(listener) = self.on_pending.get() {
+                    listener(&PendingApproval {
+                        id,
+                        task,
+                        action: action.clone(),
+                        reason,
+                    });
+                }
                 Ok(Gate::Held(id))
             }
         }

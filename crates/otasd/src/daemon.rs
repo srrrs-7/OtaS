@@ -107,6 +107,7 @@ impl Daemon {
             Some(state),
         ));
         supervisor.restore()?;
+        broker.set_pending_listener(supervisor.pending_listener());
         Ok(Self {
             config,
             broker,

@@ -335,6 +335,38 @@ async fn a_waiting_task_receives_the_outcome_of_its_approval_once() {
     assert_eq!(w.mail_send.calls(), 1);
 }
 
+/// 承認待ちができると、設定した関数ですぐに知らせる。
+#[tokio::test]
+async fn a_new_approval_is_announced_to_the_listener() {
+    let w = world();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    w.broker
+        .set_pending_listener(Arc::new(move |p| log.lock().unwrap().push(p.clone())));
+    let task = w.broker.spawn_task(all_tools());
+    w.broker
+        .call_tool(task, "mail.read", json!({}))
+        .await
+        .unwrap();
+    w.broker
+        .call_tool(task, "web.fetch", json!({}))
+        .await
+        .unwrap();
+    assert!(seen.lock().unwrap().is_empty());
+
+    let id = w
+        .broker
+        .call_tool(task, "mail.send", json!({}))
+        .await
+        .unwrap()
+        .pending()
+        .unwrap();
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen, w.broker.pending());
+    assert_eq!(seen[0].id, id);
+    assert_eq!(seen[0].task, task);
+}
+
 #[tokio::test]
 async fn a_child_cannot_use_a_grant_it_was_not_given() {
     let w = world();

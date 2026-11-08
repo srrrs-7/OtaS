@@ -23,10 +23,10 @@ mod convert;
 mod server;
 
 pub use client::{
-    ApproverClient, ConsoleClient, PendingItem, Remote, TaskClient, connect_approver,
+    ApproverClient, ConsoleClient, PendingItem, Remote, TaskClient, WatchEvent, connect_approver,
     connect_console, connect_task,
 };
-pub use server::{ConsoleBackend, Sessions, serve_approver, serve_console, serve_task};
+pub use server::{ConsoleBackend, Sessions, TaskEvent, serve_approver, serve_console, serve_task};
 
 use tokio::net::UnixStream;
 

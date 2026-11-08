@@ -37,7 +37,7 @@ rustix = { version = "1", features = ["process"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["net", "rt", "macros", "signal", "time", "io-std", "io-util"] }
+tokio = { workspace = true, features = ["net", "rt", "macros", "signal", "time", "io-std", "io-util", "sync"] }
 toml.workspace = true
 uuid.workspace = true
 

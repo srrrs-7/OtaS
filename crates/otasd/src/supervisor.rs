@@ -1,7 +1,7 @@
 //! エージェント監督。タスクを作り、作業領域を用意し、エージェントをサンドボックスで起動して窓口を渡す。
 
 use otas_broker::{Broker, BrokerError, CallResult};
-use otas_ipc::{ConsoleBackend, Sessions, serve_task};
+use otas_ipc::{ConsoleBackend, Sessions, TaskEvent, serve_task};
 use otas_ports::{
     Change, ChangeKind, CommitOutcome, FsAccess, FsRule, Mount, MountSource, NetPolicy,
     ResourceLimits, Sandbox, SandboxError, SandboxSpec, StateError, StateStore, ViewSpec,
@@ -11,13 +11,15 @@ use otas_types::{Grant, GrantSet, TaskId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// エージェントに作業領域の場所を知らせる環境変数（正本の `/data` に当たる）。
 pub const DATA_ENV: &str = "OTAS_DATA";
@@ -158,6 +160,83 @@ impl TaskTable {
     }
 }
 
+/// タスクの経過を見ている人間向けの画面の台帳。
+///
+/// ブローカーが承認待ちを知らせる関数から呼ばれるので、スレッドをまたいで使える形にする。
+#[derive(Clone, Default)]
+struct Watchers(Arc<Mutex<HashMap<TaskId, Vec<UnboundedSender<TaskEvent>>>>>);
+
+impl Watchers {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<TaskId, Vec<UnboundedSender<TaskEvent>>>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// タスクを見ている全員に知らせる。受け取る側が終わっていれば台帳から外す。
+    fn notify(&self, task: TaskId, event: TaskEvent) {
+        let mut map = self.lock();
+        if let Some(list) = map.get_mut(&task) {
+            list.retain(|tx| tx.send(event.clone()).is_ok());
+            if list.is_empty() {
+                map.remove(&task);
+            }
+        }
+    }
+
+    /// 最後の知らせを送り、タスクを台帳から外す。
+    fn finish(&self, task: TaskId, status: &TaskStatus) {
+        let json = serde_json::to_string(status).unwrap_or_else(|_| "null".into());
+        if let Some(list) = self.lock().remove(&task) {
+            for tx in list {
+                let _ = tx.send(TaskEvent::Finished(json.clone()));
+            }
+        }
+    }
+}
+
+/// エージェントの標準出力を受け取り、ログのファイルに書きながら、見ている画面に知らせる。
+///
+/// ファイルにも知らせにも完全な行だけを渡す（[`Supervisor::watch`] がファイルの中身を
+/// 最初の知らせにするので、両者をそろえておく）。書き込みと知らせの間で他の処理に譲らない。
+async fn pump_output(
+    mut pipe: tokio::net::unix::pipe::Receiver,
+    mut log: File,
+    task: TaskId,
+    watchers: Watchers,
+) {
+    use std::io::Write;
+    use tokio::io::AsyncReadExt;
+    let mut pending = Vec::new();
+    let mut chunk = vec![0u8; 16 * 1024];
+    loop {
+        let n = pipe.read(&mut chunk).await.unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        pending.extend_from_slice(&chunk[..n]);
+        if let Some(end) = pending.iter().rposition(|b| *b == b'\n') {
+            let lines: Vec<u8> = pending.drain(..=end).collect();
+            let _ = log.write_all(&lines);
+            watchers.notify(
+                task,
+                TaskEvent::Output(String::from_utf8_lossy(&lines).into_owned()),
+            );
+        }
+    }
+    // 改行で終わらなかった最後の行
+    if !pending.is_empty() {
+        pending.push(b'\n');
+        let _ = log.write_all(&pending);
+        watchers.notify(
+            task,
+            TaskEvent::Output(String::from_utf8_lossy(&pending).into_owned()),
+        );
+    }
+}
+
+/// エージェントが終わった後、出力を読み切るまで待つ上限。
+/// エージェントが残した子プロセスがパイプを持ったままでも、状態の更新は遅らせすぎない。
+const OUTPUT_DRAIN: Duration = Duration::from_secs(2);
+
 /// 監督のエラー。
 #[derive(Debug, thiserror::Error)]
 pub enum SupervisorError {
@@ -291,6 +370,7 @@ pub struct Supervisor {
     sessions: Sessions,
     task_dir: PathBuf,
     tasks: Rc<TaskTable>,
+    watchers: Watchers,
 }
 
 impl Supervisor {
@@ -313,7 +393,49 @@ impl Supervisor {
                 map: RefCell::new(BTreeMap::new()),
                 store,
             }),
+            watchers: Watchers::default(),
         }
+    }
+
+    /// ブローカーが承認待ちを作ったときに、そのタスクを見ている画面へ知らせる関数。
+    /// デーモンがブローカーに設定する（[`Broker::set_pending_listener`]）。
+    pub fn pending_listener(&self) -> otas_broker::PendingListener {
+        let watchers = self.watchers.clone();
+        Arc::new(move |item| watchers.notify(item.task, TaskEvent::Approval(item.clone())))
+    }
+
+    /// タスクの経過を知らせ始める。最初にそれまでの出力と承認待ちを送る。
+    /// 終わっているタスクなら、それに続けてすぐ最後の知らせを送る。
+    pub fn watch(&self, task: TaskId) -> Result<UnboundedReceiver<TaskEvent>, SupervisorError> {
+        let status = self.status(task).ok_or_else(|| {
+            SupervisorError::InvalidState(format!("タスク {} はありません", task.0))
+        })?;
+        let (tx, rx) = unbounded_channel();
+        // 台帳のロックを持ったまま、今までの分を送って登録する。
+        // 出力はこのスレッドでしか書かれず、承認待ちの知らせは台帳のロックを待つので、取りこぼさない
+        let mut map = self.watchers.lock();
+        match std::fs::read(self.log_dir(task).join("stdout.log")) {
+            Ok(bytes) if !bytes.is_empty() => {
+                let _ = tx.send(TaskEvent::Output(
+                    String::from_utf8_lossy(&bytes).into_owned(),
+                ));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        for item in self.broker.pending() {
+            if item.task == task {
+                let _ = tx.send(TaskEvent::Approval(item));
+            }
+        }
+        if matches!(status, TaskStatus::Running { .. }) {
+            map.entry(task).or_default().push(tx);
+        } else {
+            let json = serde_json::to_string(&status).unwrap_or_else(|_| "null".into());
+            let _ = tx.send(TaskEvent::Finished(json));
+        }
+        Ok(rx)
     }
 
     /// 保存したタスクの状態を読み戻す。デーモンの起動時に1回呼ぶ。
@@ -427,8 +549,12 @@ impl Supervisor {
 
         let dir = self.log_dir(task);
         std::fs::create_dir_all(&dir)?;
-        let stdout = File::create(dir.join("stdout.log"))?;
+        let log = File::create(dir.join("stdout.log"))?;
         let stderr = File::create(dir.join("stderr.log"))?;
+        // 標準出力はデーモンが受け取り、ファイルに書きながら見ている画面に知らせる
+        let (out_reader, out_writer) = std::io::pipe()?;
+        let out_reader =
+            tokio::net::unix::pipe::Receiver::from_owned_fd(OwnedFd::from(out_reader))?;
 
         let layout = layout(view, &request.program, self.sandbox.supports_mounts())?;
         let mut env = request.env;
@@ -443,7 +569,7 @@ impl Supervisor {
             net: NetPolicy::Deny,
             limits: request.limits.into(),
             stdin: Stdio::from(OwnedFd::from(theirs)),
-            stdout: Stdio::from(stdout),
+            stdout: Stdio::from(out_writer),
             stderr: Stdio::from(stderr),
         };
         let mut process = self.sandbox.spawn(spec)?;
@@ -455,8 +581,12 @@ impl Supervisor {
             let _ = server.await;
         });
 
+        let pump =
+            tokio::task::spawn_local(pump_output(out_reader, log, task, self.watchers.clone()));
+
         let tasks = self.tasks.clone();
         let workspace = self.workspace.clone();
+        let watchers = self.watchers.clone();
         tokio::task::spawn_local(async move {
             let status = match tokio::task::spawn_blocking(move || process.wait()).await {
                 Ok(Ok(info)) => match workspace.diff(task) {
@@ -483,7 +613,10 @@ impl Supervisor {
                     error: e.to_string(),
                 },
             };
-            tasks.set(task, status);
+            // 出力を知らせ終えてから、終わったことを知らせる
+            let _ = tokio::time::timeout(OUTPUT_DRAIN, pump).await;
+            tasks.set(task, status.clone());
+            watchers.finish(task, &status);
         });
         Ok(())
     }
@@ -603,40 +736,9 @@ impl ConsoleBackend for Supervisor {
         Ok(json!({ "version": new }).to_string())
     }
 
-    fn output(&self, task: TaskId, offset: u64) -> Result<(String, u64), String> {
-        if self.status(task).is_none() {
-            return Err(format!("タスク {} はありません", task.0));
-        }
-        read_lines_from(&self.log_dir(task).join("stdout.log"), offset).map_err(|e| e.to_string())
+    fn watch(&self, task: TaskId) -> Result<UnboundedReceiver<TaskEvent>, String> {
+        Supervisor::watch(self, task).map_err(|e| e.to_string())
     }
-}
-
-/// 1回に返す出力の上限（バイト）。
-const OUTPUT_CHUNK: u64 = 64 * 1024;
-
-/// ファイルを `offset` バイト目から、完全な行だけ読む。読んだ文字列と次に読む位置を返す。
-/// 上限まで改行がない長い行は、そこまでを返す（読み手が止まらないように）。
-fn read_lines_from(path: &Path, offset: u64) -> std::io::Result<(String, u64)> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = match File::open(path) {
-        Ok(f) => f,
-        // 起動の途中でまだ作られていない
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((String::new(), offset)),
-        Err(e) => return Err(e),
-    };
-    file.seek(SeekFrom::Start(offset))?;
-    let mut buf = Vec::new();
-    file.take(OUTPUT_CHUNK).read_to_end(&mut buf)?;
-    let end = match buf.iter().rposition(|b| *b == b'\n') {
-        Some(i) => i + 1,
-        None if buf.len() as u64 == OUTPUT_CHUNK => buf.len(),
-        None => 0,
-    };
-    buf.truncate(end);
-    Ok((
-        String::from_utf8_lossy(&buf).into_owned(),
-        offset + end as u64,
-    ))
 }
 
 #[cfg(test)]
@@ -644,23 +746,6 @@ mod tests {
     use super::*;
     use otas_ports::ViewEntry;
     use otas_types::LabelSet;
-
-    #[test]
-    fn output_is_read_in_whole_lines() {
-        let dir = std::env::temp_dir().join(format!("otas-out-{}", TaskId::new().0));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("stdout.log");
-        assert_eq!(read_lines_from(&path, 0).unwrap(), (String::new(), 0));
-
-        std::fs::write(&path, "一行目\n二行目\n書きかけ").unwrap();
-        let (text, next) = read_lines_from(&path, 0).unwrap();
-        assert_eq!(text, "一行目\n二行目\n");
-        // 書きかけの行は、改行が来るまで返さない
-        assert_eq!(read_lines_from(&path, next).unwrap(), (String::new(), next));
-        std::fs::write(&path, "一行目\n二行目\n書きかけ終わり\n").unwrap();
-        assert_eq!(read_lines_from(&path, next).unwrap().0, "書きかけ終わり\n");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
 
     #[test]
     fn the_view_comes_from_grants() {

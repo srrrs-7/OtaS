@@ -247,18 +247,15 @@ mod commands {
 /// 対話モード。
 #[cfg(unix)]
 mod chat {
-    use otas_ipc::{ConsoleClient, Remote};
+    use otas_ipc::{ConsoleClient, Remote, WatchEvent};
     use otas_types::{Action, ApprovalId, Grant, GrantSet, TaskId};
     use serde_json::{Value, json};
     use std::collections::HashSet;
     use std::io::Write;
     use std::process::ExitCode;
-    use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, BufReader, Lines, Stdin};
 
     const DEFAULT_AGENT: &str = "/usr/local/bin/otas-agent";
-    /// 経過と承認待ちを確かめる間隔。
-    const POLL: Duration = Duration::from_millis(200);
 
     const HELP: &str = "\
 依頼を日本語などで入力すると、エージェントが処理します。
@@ -421,69 +418,42 @@ mod chat {
             .submit(&options.request(goal).to_string())
             .await
             .map_err(err)?;
+        // 経過はデーモンから届く（承認待ちと終了も）。こちらから問い合わせを繰り返さない
+        let mut events = console.watch(task).await.map_err(err)?;
         let approver = console.approver();
-        let mut offset = 0;
         let mut asked: HashSet<ApprovalId> = HashSet::new();
         let status = loop {
-            offset = show_output(console, task, offset).await?;
-
-            for item in approver.pending().await.map_err(err)? {
-                if item.task != task || !asked.insert(item.id) {
-                    continue;
-                }
-                println!("  ⚠ 承認が必要です: {}", describe(&item.action));
-                println!("    理由: {}", item.reason);
-                let answer = input.ask("    承認しますか？ [y/N] ").await?;
-                if matches!(answer.as_deref(), Some("y" | "Y" | "yes")) {
-                    match approver.approve(item.id).await {
-                        Ok(Remote::Done(_)) => println!("    承認しました"),
-                        Ok(Remote::Denied(reason)) => println!("    拒否されました: {reason}"),
-                        Ok(Remote::Pending(_)) => println!("    まだ承認待ちです"),
-                        Err(e) => println!("    実行に失敗しました: {e}"),
+            match events.recv().await {
+                Some(WatchEvent::Output(lines)) => {
+                    for line in lines.lines() {
+                        if let Some(shown) = render(line) {
+                            println!("{shown}");
+                        }
                     }
-                } else {
-                    approver.reject(item.id).await.map_err(err)?;
-                    println!("    却下しました");
                 }
-            }
-
-            let status = console
-                .tasks()
-                .await
-                .map_err(err)?
-                .into_iter()
-                .find(|(id, _)| *id == task)
-                .map(|(_, s)| s)
-                .ok_or("依頼したタスクが見つかりません")?;
-            if status["state"] != "running" {
-                // 終わる直前に書かれた出力を読み切る
-                loop {
-                    let next = show_output(console, task, offset).await?;
-                    if next == offset {
-                        break;
+                // 同じ承認待ちが2回届くことがあるので、ID で重複を除く
+                Some(WatchEvent::Approval(item)) if asked.insert(item.id) => {
+                    println!("  ⚠ 承認が必要です: {}", describe(&item.action));
+                    println!("    理由: {}", item.reason);
+                    let answer = input.ask("    承認しますか？ [y/N] ").await?;
+                    if matches!(answer.as_deref(), Some("y" | "Y" | "yes")) {
+                        match approver.approve(item.id).await {
+                            Ok(Remote::Done(_)) => println!("    承認しました"),
+                            Ok(Remote::Denied(reason)) => println!("    拒否されました: {reason}"),
+                            Ok(Remote::Pending(_)) => println!("    まだ承認待ちです"),
+                            Err(e) => println!("    実行に失敗しました: {e}"),
+                        }
+                    } else {
+                        approver.reject(item.id).await.map_err(err)?;
+                        println!("    却下しました");
                     }
-                    offset = next;
                 }
-                break status;
+                Some(WatchEvent::Approval(_)) => {}
+                Some(WatchEvent::Finished(status)) => break status,
+                None => return Err("デーモンとの接続が切れました".into()),
             }
-            tokio::time::sleep(POLL).await;
         };
         finish(console, task, &status, input).await
-    }
-
-    /// 新しい出力を表示し、次に読む位置を返す。
-    async fn show_output(
-        console: &ConsoleClient,
-        task: TaskId,
-        offset: u64,
-    ) -> Result<u64, String> {
-        let (text, next) = console.output(task, offset).await.map_err(err)?;
-        for line in text.lines() {
-            if let Some(shown) = render(line) {
-                println!("{shown}");
-            }
-        }
-        Ok(next)
     }
 
     /// エージェントの経過の1行（JSON）を、人間に見せる形にする。見せないものは `None`。

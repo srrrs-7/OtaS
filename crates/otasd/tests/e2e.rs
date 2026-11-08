@@ -1001,6 +1001,22 @@ fn the_agent_loop_runs_tools_and_stops_when_the_model_call_needs_approval() {
             console.review(task).await.unwrap(),
             json!([{"path": "/data/projects/a/summary.md", "kind": "added"}])
         );
+
+        // 終わったタスクを見始めると、それまでの出力・承認待ち・終了がすぐに届く
+        let mut events = console.watch(task).await.unwrap();
+        let Some(otas_ipc::WatchEvent::Output(output)) = events.recv().await else {
+            panic!("最初は出力が届くはず");
+        };
+        assert_eq!(output.lines().count(), lines.len());
+        let Some(otas_ipc::WatchEvent::Approval(item)) = events.recv().await else {
+            panic!("次は承認待ちが届くはず");
+        };
+        assert_eq!(item.id, pending[0].id);
+        let Some(otas_ipc::WatchEvent::Finished(status)) = events.recv().await else {
+            panic!("最後は終了が届くはず");
+        };
+        assert_eq!(status["state"], "awaiting_review");
+        assert!(events.recv().await.is_none());
     });
 }
 
