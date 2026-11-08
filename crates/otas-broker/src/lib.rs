@@ -19,8 +19,9 @@ use otas_types::{
     Guarantees, LabelSet, Outcome, TaskId,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::task::{Poll, Waker};
 
 /// ブローカーのエラー。
 #[derive(Debug, thiserror::Error)]
@@ -130,6 +131,30 @@ pub enum ApprovalState {
     Resolved(Resolution),
 }
 
+/// 承認の決着の記録（保存はしない。デーモンが止まればエージェントも止まるため）。
+#[derive(Default)]
+struct Resolutions {
+    /// 承認待ちから外した操作の決着。値が `None` の間は実行中。タスクが受け取るか、タスクが終わるまで残す。
+    entries: HashMap<ApprovalId, (TaskId, Option<Resolution>)>,
+    /// 決着を待っているタスクを起こすための Waker。
+    wakers: HashMap<ApprovalId, Vec<Waker>>,
+    /// プロセスが終わったタスク。決着を受け取る者がいないので記録しない。
+    ended: HashSet<TaskId>,
+}
+
+impl Resolutions {
+    fn register(&mut self, id: ApprovalId, waker: &Waker) {
+        let list = self.wakers.entry(id).or_default();
+        if !list.iter().any(|w| w.will_wake(waker)) {
+            list.push(waker.clone());
+        }
+    }
+
+    fn take_wakers(&mut self, id: ApprovalId) -> Vec<Waker> {
+        self.wakers.remove(&id).unwrap_or_default()
+    }
+}
+
 /// 承認待ちができたときに呼ばれる関数。ブローカーのロックの外で呼ぶ。
 pub type PendingListener = Arc<dyn Fn(&PendingApproval) + Send + Sync>;
 
@@ -229,7 +254,7 @@ impl BrokerBuilder {
             tools: self.tools,
             models: self.models,
             state: Mutex::new(State::default()),
-            resolutions: Mutex::new(HashMap::new()),
+            resolutions: Mutex::new(Resolutions::default()),
             on_pending: OnceLock::new(),
             store: self.store,
         }
@@ -244,10 +269,8 @@ pub struct Broker {
     tools: HashMap<String, Arc<dyn ToolProvider>>,
     models: HashMap<String, Arc<dyn ModelProvider>>,
     state: Mutex<State>,
-    /// 承認待ちから外した操作の決着。値が `None` の間は実行中。
-    /// タスクが受け取るまで残す（保存はしない。デーモンが止まればエージェントも止まるため）。
-    /// ロックの順序は `state` → `resolutions`。
-    resolutions: Mutex<HashMap<ApprovalId, (TaskId, Option<Resolution>)>>,
+    /// 承認の決着と、それを待っているタスク。ロックの順序は `state` → `resolutions`。
+    resolutions: Mutex<Resolutions>,
     on_pending: OnceLock<PendingListener>,
     store: Option<Arc<dyn StateStore>>,
 }
@@ -290,6 +313,10 @@ impl Broker {
         if let Some(bytes) = store.load(STATE_KEY)? {
             let restored: State = serde_json::from_slice(&bytes)
                 .map_err(|e| StateError::Corrupt(format!("ブローカーの状態を読めません: {e}")))?;
+            // 読み戻したタスクはもう動いていないので、承認の決着を受け取る者もいない
+            self.resolutions()
+                .ended
+                .extend(restored.tasks.keys().copied());
             *self.state() = restored;
         }
         Ok(())
@@ -699,15 +726,71 @@ impl Broker {
         task: TaskId,
         id: ApprovalId,
     ) -> Result<ApprovalState, BrokerError> {
+        self.check_approval(task, id, None)
+    }
+
+    /// タスクの承認待ちの操作が決着するまで待ち、結果を返す（記録からは消す）。
+    ///
+    /// 決着した時点で起こされるので、繰り返し確かめる必要はない。
+    /// 他のタスクの承認待ちの ID や、タスクが終わって捨てた決着は、存在しないものとして扱う。
+    pub async fn wait_approval(
+        &self,
+        task: TaskId,
+        id: ApprovalId,
+    ) -> Result<Resolution, BrokerError> {
+        std::future::poll_fn(|cx| match self.check_approval(task, id, Some(cx.waker())) {
+            Ok(ApprovalState::Waiting) => Poll::Pending,
+            Ok(ApprovalState::Resolved(r)) => Poll::Ready(Ok(r)),
+            Err(e) => Poll::Ready(Err(e)),
+        })
+        .await
+    }
+
+    /// タスクのプロセスが終わったことを知らせる。そのタスクと子孫のタスクの承認の決着は、
+    /// もう受け取る者がいないので捨て、これからも記録しない（承認待ちそのものは残り、承認すれば実行される）。
+    pub fn end_task(&self, task: TaskId) {
         let state = self.state();
-        if state.pending.get(&id).is_some_and(|p| p.task == task) {
+        let mut resolutions = self.resolutions();
+        resolutions.ended.insert(task);
+        let gone: Vec<ApprovalId> = resolutions
+            .entries
+            .iter()
+            .filter(|(_, (owner, _))| lineage_ended(&state, &resolutions.ended, *owner))
+            .map(|(id, _)| *id)
+            .collect();
+        let mut wakers = Vec::new();
+        for id in gone {
+            resolutions.entries.remove(&id);
+            wakers.extend(resolutions.take_wakers(id));
+        }
+        drop(resolutions);
+        drop(state);
+        // 待っていた者がいれば、存在しないものとして返させる
+        wakers.into_iter().for_each(Waker::wake);
+    }
+
+    /// 決着したかを確かめる。`waker` を渡すと、まだなら決着したときに起こすよう登録する。
+    /// 確かめることと登録することを同じロックの中で行うので、起こし損ねない。
+    fn check_approval(
+        &self,
+        task: TaskId,
+        id: ApprovalId,
+        waker: Option<&Waker>,
+    ) -> Result<ApprovalState, BrokerError> {
+        let state = self.state();
+        let mut resolutions = self.resolutions();
+        let waiting = state.pending.get(&id).is_some_and(|p| p.task == task)
+            || matches!(resolutions.entries.get(&id), Some((owner, None)) if *owner == task);
+        if waiting {
+            if let Some(w) = waker {
+                resolutions.register(id, w);
+            }
             return Ok(ApprovalState::Waiting);
         }
-        let mut resolutions = self.resolutions();
-        match resolutions.get(&id) {
-            Some((owner, None)) if *owner == task => Ok(ApprovalState::Waiting),
+        match resolutions.entries.get(&id) {
             Some((owner, Some(_))) if *owner == task => {
-                let (_, resolution) = resolutions.remove(&id).expect("直前に確かめた");
+                let (_, resolution) = resolutions.entries.remove(&id).expect("直前に確かめた");
+                resolutions.wakers.remove(&id);
                 Ok(ApprovalState::Resolved(resolution.expect("直前に確かめた")))
             }
             _ => Err(BrokerError::UnknownApproval(id)),
@@ -718,14 +801,20 @@ impl Broker {
     // 内部処理
     // -----------------------------------------------------------------------
 
-    fn resolutions(&self) -> MutexGuard<'_, HashMap<ApprovalId, (TaskId, Option<Resolution>)>> {
+    fn resolutions(&self) -> MutexGuard<'_, Resolutions> {
         self.resolutions.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn resolve(&self, id: ApprovalId, resolution: Resolution) {
-        if let Some(entry) = self.resolutions().get_mut(&id) {
-            entry.1 = Some(resolution);
-        }
+        let wakers = {
+            let mut resolutions = self.resolutions();
+            match resolutions.entries.get_mut(&id) {
+                Some(entry) => entry.1 = Some(resolution),
+                None => return,
+            }
+            resolutions.take_wakers(id)
+        };
+        wakers.into_iter().for_each(Waker::wake);
     }
 
     fn judge(
@@ -944,8 +1033,12 @@ impl Broker {
             .remove(&id)
             .ok_or(BrokerError::UnknownApproval(id))?;
         self.persist(&state)?;
-        // `state` のロックを持ったまま「実行中」として記録する（待っているタスクが見失わないように）
-        self.resolutions().insert(id, (pending.task, None));
+        // `state` のロックを持ったまま「実行中」として記録する（待っているタスクが見失わないように）。
+        // 終わったタスクの分は、受け取る者がいないので記録しない
+        let mut resolutions = self.resolutions();
+        if !lineage_ended(&state, &resolutions.ended, pending.task) {
+            resolutions.entries.insert(id, (pending.task, None));
+        }
         Ok(pending)
     }
 
@@ -971,4 +1064,16 @@ impl Broker {
         })?;
         Ok(())
     }
+}
+
+/// タスクか、その祖先のどれかのプロセスが終わっているか（子タスクは親のプロセスの中で動く）。
+fn lineage_ended(state: &State, ended: &HashSet<TaskId>, task: TaskId) -> bool {
+    let mut current = Some(task);
+    while let Some(t) = current {
+        if ended.contains(&t) {
+            return true;
+        }
+        current = state.tasks.get(&t).and_then(|e| e.parent);
+    }
+    false
 }

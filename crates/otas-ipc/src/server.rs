@@ -6,9 +6,7 @@ use crate::otas_capnp::{
 };
 use capnp::capability::Rc;
 use capnp_rpc::{CapabilityServerSet, RpcSystem, rpc_twoparty_capnp, twoparty};
-use otas_broker::{
-    ApprovalState, Broker, BrokerError, CallResult, Completed, PendingApproval, Resolution,
-};
+use otas_broker::{Broker, BrokerError, CallResult, Completed, PendingApproval, Resolution};
 use otas_ports::{InferRequest, Message};
 use otas_types::{ApprovalId, GrantSet, TaskId};
 use std::cell::RefCell;
@@ -194,15 +192,12 @@ impl task_session::Server for TaskSessionImpl {
         mut results: task_session::WaitApprovalResults,
     ) -> Result<(), capnp::Error> {
         let id = parse_approval(&text(params.get()?.get_id()?)?)?;
-        // 人間の判断は数秒から数分かかる。短い間隔で確かめる
-        let resolution = loop {
-            match self.broker().poll_approval(self.task, id).map_err(failed)? {
-                ApprovalState::Waiting => {
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                }
-                ApprovalState::Resolved(r) => break r,
-            }
-        };
+        // 決着した時点でブローカーが起こす（人間の判断は数秒から数分かかる）
+        let resolution = self
+            .broker()
+            .wait_approval(self.task, id)
+            .await
+            .map_err(failed)?;
         let mut builder = results.get().init_result();
         match resolution {
             Resolution::Done(done) => builder.set_done(completed_json(done).map_err(failed)?),

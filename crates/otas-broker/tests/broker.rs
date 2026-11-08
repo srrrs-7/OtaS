@@ -403,6 +403,84 @@ async fn a_follow_up_task_inherits_the_labels_of_the_previous_one() {
     ));
 }
 
+/// 待っているタスクは、決着した時点で起こされて結果を受け取る（繰り返し確かめない）。
+#[tokio::test]
+async fn a_waiting_task_is_woken_when_its_approval_is_decided() {
+    let w = Arc::new(world());
+    let task = w.broker.spawn_task(all_tools());
+    w.broker
+        .call_tool(task, "mail.read", json!({}))
+        .await
+        .unwrap();
+    w.broker
+        .call_tool(task, "web.fetch", json!({}))
+        .await
+        .unwrap();
+    let id = w
+        .broker
+        .call_tool(task, "mail.send", json!({}))
+        .await
+        .unwrap()
+        .pending()
+        .unwrap();
+
+    let waiter = {
+        let w = w.clone();
+        tokio::spawn(async move { w.broker.wait_approval(task, id).await })
+    };
+    // 待っている間は終わらない
+    tokio::task::yield_now().await;
+    assert!(!waiter.is_finished());
+
+    w.broker.approve(id).await.unwrap();
+    let resolution = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+        .await
+        .expect("決着したのに起こされない")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(resolution, Resolution::Done(Completed::Tool(_))));
+}
+
+/// タスクが終わったら、受け取られない決着は捨て、これからも記録しない。
+#[tokio::test]
+async fn decisions_for_an_ended_task_are_not_kept() {
+    let w = world();
+    let task = w.broker.spawn_task(all_tools());
+    w.broker
+        .call_tool(task, "mail.read", json!({}))
+        .await
+        .unwrap();
+    w.broker
+        .call_tool(task, "web.fetch", json!({}))
+        .await
+        .unwrap();
+    let send = || async {
+        w.broker
+            .call_tool(task, "mail.send", json!({}))
+            .await
+            .unwrap()
+            .pending()
+            .unwrap()
+    };
+    let before = send().await;
+    let after = send().await;
+    w.broker.approve(before).await.unwrap();
+
+    w.broker.end_task(task);
+    // 終わる前の決着は捨てた
+    assert!(matches!(
+        w.broker.poll_approval(task, before),
+        Err(BrokerError::UnknownApproval(_))
+    ));
+    // 終わった後でも承認すれば実行されるが、決着は記録しない
+    w.broker.approve(after).await.unwrap();
+    assert_eq!(w.mail_send.calls(), 2);
+    assert!(matches!(
+        w.broker.poll_approval(task, after),
+        Err(BrokerError::UnknownApproval(_))
+    ));
+}
+
 #[tokio::test]
 async fn a_child_cannot_use_a_grant_it_was_not_given() {
     let w = world();

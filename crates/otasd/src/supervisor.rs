@@ -595,6 +595,7 @@ impl Supervisor {
         let tasks = self.tasks.clone();
         let workspace = self.workspace.clone();
         let watchers = self.watchers.clone();
+        let broker = self.broker.clone();
         tokio::task::spawn_local(async move {
             let status = match tokio::task::spawn_blocking(move || process.wait()).await {
                 Ok(Ok(info)) => match workspace.diff(task) {
@@ -621,6 +622,8 @@ impl Supervisor {
                     error: e.to_string(),
                 },
             };
+            // エージェントはもう承認の決着を受け取らないので、ブローカーに捨てさせる
+            broker.end_task(task);
             // 出力を知らせ終えてから、終わったことを知らせる
             let _ = tokio::time::timeout(OUTPUT_DRAIN, pump).await;
             tasks.set(task, status.clone());

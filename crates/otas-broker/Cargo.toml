@@ -19,7 +19,7 @@ async-trait.workspace = true
 otas-audit.workspace = true
 otas-policy.workspace = true
 otas-state.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["time"] }
 
 [lints]
 workspace = true
