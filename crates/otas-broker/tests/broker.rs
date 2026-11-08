@@ -426,3 +426,78 @@ async fn every_executed_call_is_recorded_before_it_runs() {
         .collect();
     assert_eq!(outcomes, vec![Outcome::Authorized, Outcome::Executed]);
 }
+
+/// 同じ保存先を使うブローカーを作る（再起動の代わり）。
+fn persistent_broker(store: Arc<otas_state::MemoryStateStore>) -> (Broker, Arc<FakeTool>) {
+    let mail_read = FakeTool::new(
+        "mail.read",
+        Effect::Internal,
+        LabelSet::of([Label::Private]),
+    );
+    let mail_send = FakeTool::new("mail.send", Effect::External, LabelSet::empty());
+    let web_fetch = FakeTool::new(
+        "web.fetch",
+        Effect::External,
+        LabelSet::of([Label::Untrusted]),
+    );
+    let broker = Broker::builder(
+        Arc::new(DefaultPolicy::default()),
+        Arc::new(MemoryAuditLog::new()),
+    )
+    .guarantees(Guarantees::STRONG)
+    .tool(mail_read)
+    .tool(mail_send.clone())
+    .tool(web_fetch)
+    .state(store)
+    .build();
+    broker.restore().unwrap();
+    (broker, mail_send)
+}
+
+#[tokio::test]
+async fn labels_and_pending_approvals_survive_a_restart() {
+    let store = Arc::new(otas_state::MemoryStateStore::new());
+
+    let (task, approval) = {
+        let (broker, mail_send) = persistent_broker(store.clone());
+        let task = broker.spawn_task(all_tools());
+        broker
+            .call_tool(task, "mail.read", json!({}))
+            .await
+            .unwrap();
+        broker
+            .call_tool(task, "web.fetch", json!({}))
+            .await
+            .unwrap();
+        let approval = broker
+            .call_tool(task, "mail.send", json!({"to": "a@example.com"}))
+            .await
+            .unwrap()
+            .pending()
+            .unwrap();
+        assert_eq!(mail_send.calls(), 0);
+        (task, approval)
+    };
+
+    // 再起動後：ラベルと承認待ちが残っている
+    let (broker, mail_send) = persistent_broker(store.clone());
+    let labels = broker.labels(task).unwrap();
+    assert!(labels.contains(Label::Private) && labels.contains(Label::Untrusted));
+    let pending = broker.pending();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, approval);
+
+    // 承認すれば実行され、承認待ちから消えたことも保存される
+    let done = broker.approve(approval).await.unwrap();
+    assert!(matches!(done, Completed::Tool(_)));
+    assert_eq!(mail_send.calls(), 1);
+
+    let (broker, mail_send) = persistent_broker(store);
+    assert!(broker.pending().is_empty());
+    // 同じ承認をもう一度使って、2回実行することはできない
+    assert!(matches!(
+        broker.approve(approval).await,
+        Err(BrokerError::UnknownApproval(_))
+    ));
+    assert_eq!(mail_send.calls(), 0);
+}

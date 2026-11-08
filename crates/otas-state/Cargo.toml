@@ -1,0 +1,16 @@
+[package]
+name = "otas-state"
+description = "OtaS の状態の保存（ファイル・メモリ）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+otas-ports.workspace = true
+
+[dev-dependencies]
+otas-types.workspace = true
+
+[lints]
+workspace = true

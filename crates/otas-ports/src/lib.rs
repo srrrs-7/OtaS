@@ -8,12 +8,14 @@
 //! （`docs/design/001-architecture.md` §4）。
 
 mod sandbox;
+mod state;
 mod workspace;
 
 pub use sandbox::{
     ExitInfo, FsAccess, FsRule, NetPolicy, ResourceLimits, Sandbox, SandboxError, SandboxProcess,
     SandboxSpec,
 };
+pub use state::{StateError, StateStore};
 pub use workspace::{
     Change, ChangeKind, CommitOutcome, ViewEntry, ViewSpec, Workspace, WorkspaceError,
     WorkspaceView,

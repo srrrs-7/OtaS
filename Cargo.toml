@@ -12,6 +12,7 @@ members = [
     "crates/otas-adapter-linux",
     "crates/otas-workspace",
     "crates/otas-models",
+    "crates/otas-state",
     "crates/otasd",
 ]
 
@@ -48,6 +49,7 @@ otas-testkit = { path = "crates/otas-testkit" }
 otas-adapter-linux = { path = "crates/otas-adapter-linux" }
 otas-workspace = { path = "crates/otas-workspace" }
 otas-models = { path = "crates/otas-models" }
+otas-state = { path = "crates/otas-state" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

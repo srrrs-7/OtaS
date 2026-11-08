@@ -26,6 +26,7 @@ otas-ipc.workspace = true
 otas-models.workspace = true
 otas-policy.workspace = true
 otas-ports.workspace = true
+otas-state.workspace = true
 otas-types.workspace = true
 otas-workspace.workspace = true
 rustix = { version = "1", features = ["process"] }

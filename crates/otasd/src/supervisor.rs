@@ -4,7 +4,8 @@ use otas_broker::{Broker, BrokerError, CallResult};
 use otas_ipc::{ConsoleBackend, Sessions, serve_task};
 use otas_ports::{
     Change, ChangeKind, CommitOutcome, FsAccess, FsRule, NetPolicy, ResourceLimits, Sandbox,
-    SandboxError, SandboxSpec, ViewSpec, Workspace, WorkspaceError, WorkspaceView,
+    SandboxError, SandboxSpec, StateError, StateStore, ViewSpec, Workspace, WorkspaceError,
+    WorkspaceView,
 };
 use otas_types::{Grant, GrantSet, TaskId};
 use serde::{Deserialize, Serialize};
@@ -111,6 +112,41 @@ pub enum TaskStatus {
         /// 理由。
         error: String,
     },
+    /// デーモンの再起動で中断した（作業領域に変更はなかった）。
+    Interrupted,
+}
+
+/// 状態を保存するときのキー。
+pub const STATE_KEY: &str = "supervisor";
+
+/// タスクの状態の一覧。変わるたびに保存する。
+struct TaskTable {
+    map: RefCell<BTreeMap<TaskId, TaskStatus>>,
+    store: Option<Arc<dyn StateStore>>,
+}
+
+impl TaskTable {
+    fn get(&self, task: TaskId) -> Option<TaskStatus> {
+        self.map.borrow().get(&task).cloned()
+    }
+
+    fn set(&self, task: TaskId, status: TaskStatus) {
+        self.map.borrow_mut().insert(task, status);
+        self.save();
+    }
+
+    /// 保存に失敗しても動作は続ける。状態は表示のためのもので、作業領域とブローカーの状態は別に保存されている。
+    fn save(&self) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        let result = serde_json::to_vec(&*self.map.borrow())
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| store.save(STATE_KEY, &bytes).map_err(|e| e.to_string()));
+        if let Err(e) = result {
+            eprintln!("otasd: タスクの状態を保存できません: {e}");
+        }
+    }
 }
 
 /// 監督のエラー。
@@ -128,6 +164,9 @@ pub enum SupervisorError {
     /// ブローカーのエラー。
     #[error(transparent)]
     Broker(#[from] BrokerError),
+    /// 状態を読み込めない。
+    #[error(transparent)]
+    State(#[from] StateError),
     /// 作業領域のエラー。
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
@@ -199,16 +238,18 @@ pub struct Supervisor {
     workspace: Arc<dyn Workspace>,
     sessions: Sessions,
     task_dir: PathBuf,
-    tasks: Rc<RefCell<BTreeMap<TaskId, TaskStatus>>>,
+    tasks: Rc<TaskTable>,
 }
 
 impl Supervisor {
     /// 監督を作る。`task_dir` にタスクごとの標準出力と標準エラー出力を置く。
+    /// `store` を渡すと、タスクの状態を保存する（読み戻すには [`Supervisor::restore`] を呼ぶ）。
     pub fn new(
         broker: Arc<Broker>,
         sandbox: Arc<dyn Sandbox>,
         workspace: Arc<dyn Workspace>,
         task_dir: PathBuf,
+        store: Option<Arc<dyn StateStore>>,
     ) -> Self {
         Self {
             sessions: Sessions::new(broker.clone()),
@@ -216,8 +257,49 @@ impl Supervisor {
             sandbox,
             workspace,
             task_dir,
-            tasks: Rc::new(RefCell::new(BTreeMap::new())),
+            tasks: Rc::new(TaskTable {
+                map: RefCell::new(BTreeMap::new()),
+                store,
+            }),
         }
+    }
+
+    /// 保存したタスクの状態を読み戻す。デーモンの起動時に1回呼ぶ。
+    ///
+    /// 動いていたタスクのエージェントは、デーモンと一緒に止まっている。
+    /// 作業領域に変更が残っていればレビュー待ちに、なければ中断として扱う。
+    pub fn restore(&self) -> Result<(), SupervisorError> {
+        let Some(store) = &self.tasks.store else {
+            return Ok(());
+        };
+        let Some(bytes) = store.load(STATE_KEY)? else {
+            return Ok(());
+        };
+        let mut map: BTreeMap<TaskId, TaskStatus> = serde_json::from_slice(&bytes)
+            .map_err(|e| StateError::Corrupt(format!("タスクの状態を読めません: {e}")))?;
+        for (task, status) in map.iter_mut() {
+            if !matches!(status, TaskStatus::Running { .. }) {
+                continue;
+            }
+            *status = match self.workspace.diff(*task) {
+                Ok(changes) if changes.is_empty() => {
+                    let _ = self.workspace.discard(*task);
+                    TaskStatus::Interrupted
+                }
+                Ok(changes) => TaskStatus::AwaitingReview {
+                    code: None,
+                    signal: None,
+                    changes: changes.len(),
+                },
+                Err(WorkspaceError::NotFound(_)) => TaskStatus::Interrupted,
+                Err(e) => TaskStatus::Unknown {
+                    error: e.to_string(),
+                },
+            };
+        }
+        *self.tasks.map.borrow_mut() = map;
+        self.tasks.save();
+        Ok(())
     }
 
     /// タスクのログを置くディレクトリ。
@@ -226,11 +308,11 @@ impl Supervisor {
     }
 
     fn status(&self, task: TaskId) -> Option<TaskStatus> {
-        self.tasks.borrow().get(&task).cloned()
+        self.tasks.get(task)
     }
 
     fn set_status(&self, task: TaskId, status: TaskStatus) {
-        self.tasks.borrow_mut().insert(task, status);
+        self.tasks.set(task, status);
     }
 
     /// 起動の途中で失敗したときの後片付け。
@@ -347,7 +429,7 @@ impl Supervisor {
                     error: e.to_string(),
                 },
             };
-            tasks.borrow_mut().insert(task, status);
+            tasks.set(task, status);
         });
         Ok(())
     }
@@ -355,6 +437,7 @@ impl Supervisor {
     /// タスクの一覧。
     pub fn tasks(&self) -> Vec<(TaskId, TaskStatus)> {
         self.tasks
+            .map
             .borrow()
             .iter()
             .map(|(id, s)| (*id, s.clone()))

@@ -26,6 +26,7 @@ AI エージェントにすべての作業を依頼する、Linux ベースの O
 | `otas-adapter-linux` | Linux のサンドボックス（Landlock・seccomp・資源の上限）。起動役 `otas-sandbox-exec` を含む |
 | `otas-workspace` | 作業領域と正本の版管理（ハードリンクによる、特権を使わない実装）。3者比較によるコミット、巻き戻し、ファイルを通じたラベルの伝播 |
 | `otas-models` | モデルのアダプタ。Claude API（Messages API）と OpenAI 互換 API（Ollama・llama.cpp などのローカルモデルを含む）。API キーはデーモンの中だけに置く |
+| `otas-state` | 状態の保存（ファイル・メモリ）。ブローカーと監督が再起動をまたいで続きから動けるようにする |
 | `otasd` | デーモン `otasd`、CLI `otas`、動作確認用のエージェント `otas-demo-agent` |
 
 ## 動きの概要

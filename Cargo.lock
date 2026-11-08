@@ -857,7 +857,9 @@ dependencies = [
  "otas-ifc",
  "otas-policy",
  "otas-ports",
+ "otas-state",
  "otas-types",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",
@@ -926,6 +928,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "otas-state"
+version = "0.1.0"
+dependencies = [
+ "otas-ports",
+ "otas-types",
+]
+
+[[package]]
 name = "otas-testkit"
 version = "0.1.0"
 dependencies = [
@@ -969,6 +979,7 @@ dependencies = [
  "otas-models",
  "otas-policy",
  "otas-ports",
+ "otas-state",
  "otas-types",
  "otas-workspace",
  "rustix",

@@ -7,7 +7,8 @@ use otas_audit::FileAuditLog;
 use otas_broker::Broker;
 use otas_ipc::{ConsoleBackend, serve_console, verify_peer_uid};
 use otas_policy::DefaultPolicy;
-use otas_ports::{AuditError, Sandbox, Workspace, WorkspaceError};
+use otas_ports::{AuditError, Sandbox, StateStore, Workspace, WorkspaceError};
+use otas_state::FileStateStore;
 use otas_workspace::HardlinkStore;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
 use std::rc::Rc;
@@ -23,6 +24,15 @@ pub enum DaemonError {
     /// 作業領域を開けない。
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
+    /// 保存した状態を読み込めない。
+    #[error(transparent)]
+    State(#[from] otas_ports::StateError),
+    /// ブローカーの状態を読み戻せない。
+    #[error(transparent)]
+    Broker(#[from] otas_broker::BrokerError),
+    /// タスクの状態を読み戻せない。
+    #[error(transparent)]
+    Supervisor(#[from] crate::supervisor::SupervisorError),
     /// モデルの設定が不正、または API キーが見つからない。
     #[error(transparent)]
     Model(#[from] otas_models::ModelConfigError),
@@ -68,13 +78,19 @@ impl Daemon {
         for model in &config.models {
             builder = builder.model(otas_models::build_from_env(model)?);
         }
-        let broker = Arc::new(builder.build());
+        // タスクの権限とラベル、承認待ち、タスクの状態を保存し、再起動しても続きから動けるようにする
+        let state: Arc<dyn StateStore> =
+            Arc::new(FileStateStore::open(config.state_dir.join("state"))?);
+        let broker = Arc::new(builder.state(state.clone()).build());
+        broker.restore()?;
         let supervisor = Rc::new(Supervisor::new(
             broker.clone(),
             sandbox,
             store.clone(),
             config.task_dir(),
+            Some(state),
         ));
+        supervisor.restore()?;
         Ok(Self {
             config,
             broker,

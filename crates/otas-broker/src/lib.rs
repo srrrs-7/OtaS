@@ -11,12 +11,13 @@
 
 use otas_ports::{
     AuditError, AuditSink, InferRequest, InferResponse, ModelError, ModelProvider, PolicyContext,
-    PolicyEngine, ToolError, ToolOutput, ToolProvider,
+    PolicyEngine, StateError, StateStore, ToolError, ToolOutput, ToolProvider,
 };
 use otas_types::{
     AccessRequest, Action, ApprovalId, AttenuationError, AuditEntry, Decision, Effect, GrantSet,
     Guarantees, LabelSet, Outcome, TaskId,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -58,7 +59,13 @@ pub enum BrokerError {
     /// 監査ログに書けなかった。
     #[error(transparent)]
     Audit(#[from] AuditError),
+    /// 状態を保存または読み込みできなかった。
+    #[error(transparent)]
+    State(#[from] StateError),
 }
+
+/// 状態を保存するときのキー。
+pub const STATE_KEY: &str = "broker";
 
 /// 呼び出しの結果。
 #[derive(Debug, Clone, PartialEq)]
@@ -113,14 +120,14 @@ pub struct PendingApproval {
     pub reason: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct TaskEntry {
     grants: GrantSet,
     labels: LabelSet,
     parent: Option<TaskId>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 enum PendingOp {
     Read { data_labels: LabelSet },
     Write,
@@ -128,7 +135,7 @@ enum PendingOp {
     Infer { request: InferRequest },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct PendingCall {
     task: TaskId,
     action: Action,
@@ -137,7 +144,7 @@ struct PendingCall {
     op: PendingOp,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct State {
     tasks: HashMap<TaskId, TaskEntry>,
     pending: HashMap<ApprovalId, PendingCall>,
@@ -158,9 +165,17 @@ pub struct BrokerBuilder {
     guarantees: Guarantees,
     tools: HashMap<String, Arc<dyn ToolProvider>>,
     models: HashMap<String, Arc<dyn ModelProvider>>,
+    store: Option<Arc<dyn StateStore>>,
 }
 
 impl BrokerBuilder {
+    /// 状態の保存先を設定する。設定すると、状態が変わるたびに保存する。
+    /// 保存した状態を読み戻すには、作った後に [`Broker::restore`] を呼ぶ。
+    pub fn state(mut self, store: Arc<dyn StateStore>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
     /// 実行環境の保証を設定する（既定は保証なし）。
     pub fn guarantees(mut self, guarantees: Guarantees) -> Self {
         self.guarantees = guarantees;
@@ -188,6 +203,7 @@ impl BrokerBuilder {
             tools: self.tools,
             models: self.models,
             state: Mutex::new(State::default()),
+            store: self.store,
         }
     }
 }
@@ -200,6 +216,7 @@ pub struct Broker {
     tools: HashMap<String, Arc<dyn ToolProvider>>,
     models: HashMap<String, Arc<dyn ModelProvider>>,
     state: Mutex<State>,
+    store: Option<Arc<dyn StateStore>>,
 }
 
 impl Broker {
@@ -211,6 +228,7 @@ impl Broker {
             guarantees: Guarantees::NONE,
             tools: HashMap::new(),
             models: HashMap::new(),
+            store: None,
         }
     }
 
@@ -218,14 +236,45 @@ impl Broker {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// 状態を丸ごと保存する（保存先がなければ何もしない）。ロックを持ったまま呼ぶ。
+    fn persist(&self, state: &State) -> Result<(), BrokerError> {
+        if let Some(store) = &self.store {
+            let bytes = serde_json::to_vec(state)
+                .map_err(|e| StateError::Corrupt(format!("状態を書き出せません: {e}")))?;
+            store.save(STATE_KEY, &bytes)?;
+        }
+        Ok(())
+    }
+
+    /// 保存した状態を読み戻す（タスクの権限とラベル、承認待ち）。デーモンの起動時に1回呼ぶ。
+    ///
+    /// 読み戻したタスクのエージェントはもう動いていない（デーモンと一緒に止まっている）。
+    /// 承認待ちの操作と、作業領域のコミットの判定のために、権限とラベルを残しておく。
+    pub fn restore(&self) -> Result<(), BrokerError> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        if let Some(bytes) = store.load(STATE_KEY)? {
+            let restored: State = serde_json::from_slice(&bytes)
+                .map_err(|e| StateError::Corrupt(format!("ブローカーの状態を読めません: {e}")))?;
+            *self.state() = restored;
+        }
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // タスク
     // -----------------------------------------------------------------------
 
     /// 最上位のタスクを登録する（エージェント監督が人間の依頼から作る）。
+    ///
+    /// 新しいタスクの保存に失敗しても登録は続ける。ラベルのない新しいタスクが再起動で消えても、
+    /// 後の操作が「不明なタスク」として拒否されるだけで安全側に倒れる。また、次に状態が変わったときに
+    /// 状態を丸ごと保存し直すので、そこで回復する。
     pub fn spawn_task(&self, grants: GrantSet) -> TaskId {
         let id = TaskId::new();
-        self.state().tasks.insert(
+        let mut state = self.state();
+        state.tasks.insert(
             id,
             TaskEntry {
                 grants,
@@ -233,6 +282,7 @@ impl Broker {
                 parent: None,
             },
         );
+        let _ = self.persist(&state);
         id
     }
 
@@ -254,6 +304,7 @@ impl Broker {
                 parent: Some(parent),
             },
         );
+        self.persist(&state)?;
         Ok(id)
     }
 
@@ -273,6 +324,7 @@ impl Broker {
             .get_mut(&parent)
             .ok_or(BrokerError::UnknownTask(parent))?;
         otas_ifc::propagate(&mut parent_entry.labels, &child_labels);
+        self.persist(&state)?;
         Ok(())
     }
 
@@ -305,7 +357,7 @@ impl Broker {
             Gate::Held(id) => Ok(CallResult::Pending(id)),
             Gate::Proceed { labels, decision } => {
                 self.authorize(task, &action, Effect::Internal, &labels, &decision, false)?;
-                self.observe(task, data_labels);
+                self.observe(task, data_labels)?;
                 self.record(
                     task,
                     &action,
@@ -418,11 +470,8 @@ impl Broker {
     /// 承認後にもう一度ポリシーで判定し、その間に権限が取り消されていれば拒否する。
     /// 承認で覆せるのは「人間の承認待ち」という判定だけで、拒否は覆せない。
     pub async fn approve(&self, id: ApprovalId) -> Result<Completed, BrokerError> {
-        let pending = self
-            .state()
-            .pending
-            .remove(&id)
-            .ok_or(BrokerError::UnknownApproval(id))?;
+        // 実行する前に承認待ちから外して保存する。途中で落ちても、同じ操作を2回実行しない（多くて1回）
+        let pending = self.take_pending(id)?;
         let PendingCall {
             task,
             action,
@@ -451,7 +500,7 @@ impl Broker {
         match op {
             PendingOp::Read { data_labels } => {
                 self.authorize(task, &action, effect, &labels, &decision, true)?;
-                self.observe(task, &data_labels);
+                self.observe(task, &data_labels)?;
                 self.record(
                     task,
                     &action,
@@ -509,11 +558,7 @@ impl Broker {
 
     /// 人間が却下した操作を破棄する。操作は実行されない。
     pub fn reject(&self, id: ApprovalId) -> Result<(), BrokerError> {
-        let pending = self
-            .state()
-            .pending
-            .remove(&id)
-            .ok_or(BrokerError::UnknownApproval(id))?;
+        let pending = self.take_pending(id)?;
         let labels = self.labels(pending.task)?;
         self.record(
             pending.task,
@@ -598,7 +643,8 @@ impl Broker {
                     false,
                     Outcome::Pending { approval: id },
                 )?;
-                self.state().pending.insert(
+                let mut state = self.state();
+                state.pending.insert(
                     id,
                     PendingCall {
                         task,
@@ -608,6 +654,7 @@ impl Broker {
                         op: op(),
                     },
                 );
+                self.persist(&state)?;
                 Ok(Gate::Held(id))
             }
         }
@@ -629,7 +676,7 @@ impl Broker {
         self.authorize(task, &action, spec.effect, &labels, &decision, approved)?;
         match tool.call(args).await {
             Ok(output) => {
-                self.observe(task, &spec.output_labels.joined(&output.labels));
+                self.observe(task, &spec.output_labels.joined(&output.labels))?;
                 self.record(
                     task,
                     &action,
@@ -721,10 +768,23 @@ impl Broker {
         )
     }
 
-    fn observe(&self, task: TaskId, observed: &LabelSet) {
-        if let Some(entry) = self.state().tasks.get_mut(&task) {
+    /// 観測したラベルをタスクに取り込み、保存する。ラベルは安全に関わるので、保存の失敗はエラーにする。
+    fn observe(&self, task: TaskId, observed: &LabelSet) -> Result<(), BrokerError> {
+        let mut state = self.state();
+        if let Some(entry) = state.tasks.get_mut(&task) {
             otas_ifc::propagate(&mut entry.labels, observed);
         }
+        self.persist(&state)
+    }
+
+    fn take_pending(&self, id: ApprovalId) -> Result<PendingCall, BrokerError> {
+        let mut state = self.state();
+        let pending = state
+            .pending
+            .remove(&id)
+            .ok_or(BrokerError::UnknownApproval(id))?;
+        self.persist(&state)?;
+        Ok(pending)
     }
 
     #[allow(clippy::too_many_arguments)]

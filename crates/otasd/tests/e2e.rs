@@ -591,3 +591,95 @@ fn a_missing_api_key_stops_the_daemon_from_starting() {
     let result = Daemon::new(config, Arc::new(sandbox));
     assert!(matches!(result, Err(otasd::DaemonError::Model(_))));
 }
+
+/// 再起動：承認待ち、レビュー待ちの作業領域、タスクのラベルは、デーモンを再起動しても残る。
+#[test]
+fn approvals_and_reviews_survive_a_daemon_restart() {
+    let state_dir = std::env::temp_dir().join(format!("otasd-restart-{}", TaskId::new()));
+    let config = Config::from_toml(&format!(
+        "state_dir = {state:?}\nlauncher = {launcher:?}\n\
+         [[data.labels]]\npath = \"/data/mail\"\nlabels = [\"private\"]\n\
+         [demo]\ntools = true\n",
+        state = state_dir.display().to_string(),
+        launcher = launcher().display().to_string(),
+    ))
+    .unwrap();
+
+    // 1回目の起動：タスクが送信を保留し、作業領域に変更を残して終わる。もう1つのタスクは動いたまま
+    let (task, sleeper) = {
+        let config = config.clone();
+        let mut ids = None;
+        run_local(async {
+            let (_daemon, console) = start_daemon(&config).await;
+            let steps = json!([
+                {"write_file": "$OTAS_DATA/projects/a/report.md", "content": "報告"},
+                {"tool": "demo.fetch_untrusted"},
+                {"tool": "demo.send"}
+            ]);
+            let request = json!({
+                "program": agent(),
+                "args": [steps.to_string()],
+                "grants": [
+                    {"kind": "read", "prefix": "/data/mail"},
+                    {"kind": "write", "prefix": "/data/projects/a"},
+                    {"kind": "tool", "pattern": "demo.*"}
+                ]
+            });
+            let task = console.submit(&request.to_string()).await.unwrap();
+            assert_eq!(
+                wait_for_exit(&console, task).await["state"],
+                "awaiting_review"
+            );
+            assert_eq!(console.approver().pending().await.unwrap().len(), 1);
+
+            let sleeper = console
+                .submit(&json!({"program": "/bin/sleep", "args": ["3"]}).to_string())
+                .await
+                .unwrap();
+            ids = Some((task, sleeper));
+        });
+        ids.unwrap()
+    };
+
+    // 2回目の起動：同じ設定（同じ状態ディレクトリ）で起動し直す
+    run_local(async {
+        let (daemon, console) = start_daemon(&config).await;
+        let tasks = console.tasks().await.unwrap();
+        let status = |id: TaskId| tasks.iter().find(|(t, _)| *t == id).unwrap().1.clone();
+        assert_eq!(status(task)["state"], "awaiting_review");
+        // 動いていたタスクは、変更がないので中断として扱われる
+        assert_eq!(status(sleeper)["state"], "interrupted");
+
+        // 承認待ちが残っていて、承認すれば実行される
+        let approver = console.approver();
+        let pending = approver.pending().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].task, task);
+        assert!(matches!(
+            approver.approve(pending[0].id).await.unwrap(),
+            Remote::Done(_)
+        ));
+
+        // レビュー待ちの変更をコミットできる。書いたファイルには、再起動前に積み上がったラベルが付く
+        let committed = console.commit(task).await.unwrap();
+        assert_eq!(committed["result"], "applied", "{committed}");
+        assert_eq!(
+            std::fs::read_to_string(daemon.data_dir().join("projects/a/report.md")).unwrap(),
+            "報告"
+        );
+        let labels: Value = serde_json::from_slice(
+            &std::fs::read(config.store_dir().join("meta/labels.json")).unwrap(),
+        )
+        .unwrap();
+        let report = &labels["projects/a/report.md"];
+        assert!(
+            report.as_array().unwrap().contains(&json!("private"))
+                && report.as_array().unwrap().contains(&json!("untrusted")),
+            "{labels}"
+        );
+
+        // 監査ログは再起動をまたいでつながっている
+        let records = FileAuditLog::read_all(config.audit_log()).unwrap();
+        verify_chain(&records).unwrap();
+    });
+}
