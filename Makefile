@@ -1,7 +1,7 @@
 # OtaS の Makefile。ビルド・テスト・起動はすべてコンテナの中で行う（ホストでは動かさない）。
 #
 #   make up                 手元でイメージをビルドして otasd を起動する
-#   make up IMAGE=ghcr.io/srrrs-7/otas:0.1.1   公開されたイメージで起動する
+#   make up IMAGE=ghcr.io/srrrs-7/otas:0.1.2   公開されたイメージで起動する
 #   make otas ARGS=tasks    CLI を使う
 #   make help               ほかのターゲットの一覧
 
