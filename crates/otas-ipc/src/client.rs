@@ -110,6 +110,52 @@ impl ConsoleClient {
         Ok(items)
     }
 
+    /// 作業領域の変更。
+    pub async fn review(&self, task: TaskId) -> Result<serde_json::Value, IpcError> {
+        let mut req = self.cap.review_request();
+        req.get().set_task_id(task.0.to_string());
+        let response = req.send().promise.await?;
+        Ok(serde_json::from_str(&text(
+            response.get()?.get_changes_json()?,
+        )?)?)
+    }
+
+    /// 作業領域の変更を正本にコミットする。
+    pub async fn commit(&self, task: TaskId) -> Result<serde_json::Value, IpcError> {
+        let mut req = self.cap.commit_request();
+        req.get().set_task_id(task.0.to_string());
+        let response = req.send().promise.await?;
+        Ok(serde_json::from_str(&text(
+            response.get()?.get_result_json()?,
+        )?)?)
+    }
+
+    /// 作業領域を捨てる。
+    pub async fn discard(&self, task: TaskId) -> Result<(), IpcError> {
+        let mut req = self.cap.discard_request();
+        req.get().set_task_id(task.0.to_string());
+        req.send().promise.await?;
+        Ok(())
+    }
+
+    /// 正本の版の一覧。
+    pub async fn versions(&self) -> Result<serde_json::Value, IpcError> {
+        let response = self.cap.versions_request().send().promise.await?;
+        Ok(serde_json::from_str(&text(
+            response.get()?.get_versions_json()?,
+        )?)?)
+    }
+
+    /// 正本を指定した版に戻す。
+    pub async fn rollback(&self, version: u64) -> Result<serde_json::Value, IpcError> {
+        let mut req = self.cap.rollback_request();
+        req.get().set_version(version);
+        let response = req.send().promise.await?;
+        Ok(serde_json::from_str(&text(
+            response.get()?.get_result_json()?,
+        )?)?)
+    }
+
     /// 承認の窓口。
     pub fn approver(&self) -> ApproverClient {
         // パイプライン化：応答を待たずに、返ってくるはずの窓口を使い始められる

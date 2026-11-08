@@ -92,6 +92,8 @@ impl<T> CallResult<T> {
 pub enum Completed {
     /// データの読み取りが許可された。
     Read,
+    /// データの書き込み（コミット）が許可された。
+    Write,
     /// ツールの実行結果。
     Tool(ToolOutput),
     /// 推論の結果。
@@ -121,6 +123,7 @@ struct TaskEntry {
 #[derive(Debug)]
 enum PendingOp {
     Read { data_labels: LabelSet },
+    Write,
     Tool { args: serde_json::Value },
     Infer { request: InferRequest },
 }
@@ -317,6 +320,29 @@ impl Broker {
         }
     }
 
+    /// データの書き込み（作業領域の変更を正本にコミットすること）を判定する。
+    ///
+    /// 実際の書き込みは作業領域が行う。ここでは判定と記録だけを行う。
+    pub fn write_data(&self, task: TaskId, path: &str) -> Result<CallResult<()>, BrokerError> {
+        let action = Action::WriteData { path: path.into() };
+        match self.gate(task, &action, Effect::Internal, || PendingOp::Write)? {
+            Gate::Held(id) => Ok(CallResult::Pending(id)),
+            Gate::Proceed { labels, decision } => {
+                self.authorize(task, &action, Effect::Internal, &labels, &decision, false)?;
+                self.record(
+                    task,
+                    &action,
+                    Effect::Internal,
+                    labels,
+                    decision,
+                    false,
+                    Outcome::Executed,
+                )?;
+                Ok(CallResult::Done(()))
+            }
+        }
+    }
+
     /// ツールを呼び出す。
     pub async fn call_tool(
         &self,
@@ -436,6 +462,19 @@ impl Broker {
                     Outcome::Executed,
                 )?;
                 Ok(Completed::Read)
+            }
+            PendingOp::Write => {
+                self.authorize(task, &action, effect, &labels, &decision, true)?;
+                self.record(
+                    task,
+                    &action,
+                    effect,
+                    labels,
+                    decision,
+                    true,
+                    Outcome::Executed,
+                )?;
+                Ok(Completed::Write)
             }
             PendingOp::Tool { args } => {
                 let name = match &action {

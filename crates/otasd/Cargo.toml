@@ -26,6 +26,7 @@ otas-ipc.workspace = true
 otas-policy.workspace = true
 otas-ports.workspace = true
 otas-types.workspace = true
+otas-workspace.workspace = true
 rustix = { version = "1", features = ["process"] }
 serde.workspace = true
 serde_json.workspace = true

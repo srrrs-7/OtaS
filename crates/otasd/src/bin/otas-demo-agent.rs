@@ -8,17 +8,28 @@
 //! [
 //!   {"tool": "demo.read_private"},
 //!   {"tool": "demo.send", "args": {"to": "someone@example.com"}},
+//!   {"read_file": "$OTAS_DATA/mail/1.eml"},
+//!   {"write_file": "$OTAS_DATA/projects/a/notes.md", "content": "v2"},
 //!   {"read_file": "/etc/passwd"}
 //! ]
 //! ```
 //!
 //! ツールは標準入力として渡されたタスク専用の窓口（ブローカー）経由で呼ぶ。
-//! `read_file` はブローカーを通さずにファイルを直接読もうとする（サンドボックスの確認用）。
+//! `read_file` と `write_file` はファイルを直接読み書きする（作業領域とサンドボックスの確認用）。
+//! パスの先頭の `$OTAS_DATA` は作業領域の根（正本の `/data` に当たる）に置き換える。
 //! 結果は1手順につき1行の JSON で標準出力に書く。
 
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+/// 先頭の `$OTAS_DATA` を作業領域の根に置き換える。
+fn expand(path: &Path) -> PathBuf {
+    match (path.strip_prefix("$OTAS_DATA"), std::env::var("OTAS_DATA")) {
+        (Ok(rest), Ok(root)) => Path::new(&root).join(rest),
+        _ => path.to_path_buf(),
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -30,6 +41,10 @@ enum Step {
     },
     ReadFile {
         read_file: PathBuf,
+    },
+    WriteFile {
+        write_file: PathBuf,
+        content: String,
     },
 }
 
@@ -87,7 +102,16 @@ async fn run(steps: Vec<Step>) -> ExitCode {
                     json!({"step": i, "tool": tool, "result": "error", "error": e.to_string()})
                 }
             },
-            Step::ReadFile { read_file } => match std::fs::read(&read_file) {
+            Step::WriteFile {
+                write_file,
+                content,
+            } => match std::fs::write(expand(&write_file), content) {
+                Ok(()) => json!({"step": i, "write_file": write_file, "result": "done"}),
+                Err(e) => {
+                    json!({"step": i, "write_file": write_file, "result": "error", "error": e.to_string()})
+                }
+            },
+            Step::ReadFile { read_file } => match std::fs::read(expand(&read_file)) {
                 Ok(bytes) => {
                     json!({"step": i, "read_file": read_file, "result": "done", "bytes": bytes.len()})
                 }

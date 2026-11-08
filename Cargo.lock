@@ -449,6 +449,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "otas-workspace"
+version = "0.1.0"
+dependencies = [
+ "otas-ports",
+ "otas-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "otasd"
 version = "0.1.0"
 dependencies = [
@@ -460,6 +470,7 @@ dependencies = [
  "otas-policy",
  "otas-ports",
  "otas-types",
+ "otas-workspace",
  "rustix",
  "serde",
  "serde_json",

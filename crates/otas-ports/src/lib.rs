@@ -8,10 +8,15 @@
 //! （`docs/design/001-architecture.md` §4）。
 
 mod sandbox;
+mod workspace;
 
 pub use sandbox::{
     ExitInfo, FsAccess, FsRule, NetPolicy, ResourceLimits, Sandbox, SandboxError, SandboxProcess,
     SandboxSpec,
+};
+pub use workspace::{
+    Change, ChangeKind, CommitOutcome, ViewEntry, ViewSpec, Workspace, WorkspaceError,
+    WorkspaceView,
 };
 
 use async_trait::async_trait;

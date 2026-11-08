@@ -1,0 +1,16 @@
+[package]
+name = "otas-workspace"
+description = "OtaS の作業領域と版管理（ハードリンクによる、特権を使わない実装）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+otas-ports.workspace = true
+otas-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

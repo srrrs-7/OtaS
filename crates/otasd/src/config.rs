@@ -1,6 +1,6 @@
 //! デーモンの設定（TOML）。
 
-use otas_types::{Guarantees, Level};
+use otas_types::{Guarantees, LabelSet, Level};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -26,9 +26,31 @@ pub struct Config {
     /// ポリシーの設定。
     #[serde(default)]
     pub policy: PolicyConfig,
+    /// データ（正本）の設定。
+    #[serde(default)]
+    pub data: DataConfig,
     /// 動作確認用の設定。
     #[serde(default)]
     pub demo: DemoConfig,
+}
+
+/// データ（正本）の設定。
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DataConfig {
+    /// 範囲ごとのラベル。その範囲を作業領域に見せたタスクは、このラベルを持つ。
+    #[serde(default)]
+    pub labels: Vec<LabelRule>,
+}
+
+/// 範囲に付けるラベル。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LabelRule {
+    /// 正本上の論理パス（`/data/...`）。
+    pub path: String,
+    /// 付けるラベル（`private`、`untrusted`、`secret`）。
+    pub labels: LabelSet,
 }
 
 /// ポリシーの設定。
@@ -94,6 +116,11 @@ impl Config {
     pub fn task_dir(&self) -> PathBuf {
         self.state_dir.join("tasks")
     }
+
+    /// 正本・版・作業領域を置くディレクトリ。
+    pub fn store_dir(&self) -> PathBuf {
+        self.state_dir.join("store")
+    }
 }
 
 #[cfg(test)]
@@ -124,6 +151,22 @@ mod tests {
             "#,
         );
         assert!(e.is_err());
+    }
+
+    #[test]
+    fn data_labels_are_read() {
+        let c = Config::from_toml(
+            r#"
+            state_dir = "/x"
+            launcher = "/y"
+            [[data.labels]]
+            path = "/data/mail"
+            labels = ["private"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.data.labels[0].path, "/data/mail");
+        assert!(c.data.labels[0].labels.contains(otas_types::Label::Private));
     }
 
     #[test]

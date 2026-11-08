@@ -24,6 +24,7 @@ AI エージェントにすべての作業を依頼する、Linux ベースの O
 | `otas-ipc` | IPC 層（Cap'n Proto RPC）。タスクごとの窓口と承認の窓口をケイパビリティとして公開する |
 | `otas-testkit` | テスト用の偽のツール・モデルと、標準構成のブローカー（公開しない） |
 | `otas-adapter-linux` | Linux のサンドボックス（Landlock・seccomp・資源の上限）。起動役 `otas-sandbox-exec` を含む |
+| `otas-workspace` | 作業領域と正本の版管理（ハードリンクによる、特権を使わない実装）。3者比較によるコミット、巻き戻し、ファイルを通じたラベルの伝播 |
 | `otasd` | デーモン `otasd`、CLI `otas`、動作確認用のエージェント `otas-demo-agent` |
 
 ## 動きの概要
@@ -35,9 +36,11 @@ AI エージェントにすべての作業を依頼する、Linux ベースの O
 ```
 
 1. 人間が `otas submit` でタスクを依頼する（プログラム・引数・権限）。
-2. `otasd` はタスクを作り、エージェントをサンドボックスで起動して、そのタスク専用の窓口を stdin として渡す。見えるファイルは権限（`read` / `write`）から自動で決まる。
-3. エージェントの操作はすべて窓口（ブローカー）を通り、判定されて監査ログに残る。高リスクの操作は承認待ちになる。
-4. 人間が `otas pending` で確認し、`otas approve` / `otas reject` で決める。
+2. `otasd` はタスクを作り、権限（`read` / `write`）の範囲だけを見せる作業領域を用意する。見せたデータのラベル（私的など）はタスクに取り込まれる。
+3. エージェントをサンドボックスで起動し、そのタスク専用の窓口を stdin として、作業領域の場所を `OTAS_DATA` として渡す。
+4. エージェントの操作はすべて窓口（ブローカー）を通り、判定されて監査ログに残る。高リスクの操作は承認待ちになる（`otas pending` / `approve` / `reject`）。
+5. エージェントが書いたファイルは作業領域にたまり、正本にはまだ反映されない。人間が `otas diff` で確認し、`otas commit` か `otas discard` で決める。コミットしたファイルにはタスクのラベルが付く。
+6. 正本は版として残り、`otas versions` / `otas rollback` で戻せる。
 
 設定の例は [config/otasd.example.toml](config/otasd.example.toml)、依頼から承認までの通しの流れは `crates/otasd/tests/e2e.rs` を参照してください。
 

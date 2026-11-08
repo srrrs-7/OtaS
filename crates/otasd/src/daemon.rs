@@ -7,7 +7,8 @@ use otas_audit::FileAuditLog;
 use otas_broker::Broker;
 use otas_ipc::{ConsoleBackend, serve_console, verify_peer_uid};
 use otas_policy::DefaultPolicy;
-use otas_ports::{AuditError, Sandbox};
+use otas_ports::{AuditError, Sandbox, Workspace, WorkspaceError};
+use otas_workspace::HardlinkStore;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -19,6 +20,9 @@ pub enum DaemonError {
     /// 監査ログを開けない（改ざんを検知した場合を含む）。
     #[error(transparent)]
     Audit(#[from] AuditError),
+    /// 作業領域を開けない。
+    #[error(transparent)]
+    Workspace(#[from] WorkspaceError),
     /// ディレクトリやソケットの操作に失敗した。
     #[error("入出力に失敗しました: {0}")]
     Io(#[from] std::io::Error),
@@ -29,6 +33,7 @@ pub struct Daemon {
     config: Config,
     broker: Arc<Broker>,
     supervisor: Rc<Supervisor>,
+    store: Arc<HardlinkStore>,
 }
 
 impl Daemon {
@@ -41,20 +46,40 @@ impl Daemon {
         std::fs::set_permissions(&config.state_dir, std::fs::Permissions::from_mode(0o700))?;
 
         let audit = Arc::new(FileAuditLog::open(config.audit_log())?);
+        let store = Arc::new(HardlinkStore::open(config.store_dir())?);
+        for rule in &config.data.labels {
+            store.add_labels(&rule.path, &rule.labels)?;
+        }
+
+        // 環境の保証は、サンドボックスと作業領域の申告を合わせたもの
+        let mut guarantees = sandbox.guarantees();
+        guarantees.snapshot = store.snapshot_level();
+
         let policy = Arc::new(DefaultPolicy::new(config.policy.external_requires));
-        let mut builder = Broker::builder(policy, audit).guarantees(sandbox.guarantees());
+        let mut builder = Broker::builder(policy, audit).guarantees(guarantees);
         if config.demo.tools {
             for tool in demo::tools() {
                 builder = builder.tool(tool);
             }
         }
         let broker = Arc::new(builder.build());
-        let supervisor = Rc::new(Supervisor::new(broker.clone(), sandbox, config.task_dir()));
+        let supervisor = Rc::new(Supervisor::new(
+            broker.clone(),
+            sandbox,
+            store.clone(),
+            config.task_dir(),
+        ));
         Ok(Self {
             config,
             broker,
             supervisor,
+            store,
         })
+    }
+
+    /// 正本の置き場所（論理パス `/data` に当たる）。
+    pub fn data_dir(&self) -> std::path::PathBuf {
+        self.store.live_dir()
     }
 
     /// ブローカー。

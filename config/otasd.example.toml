@@ -17,6 +17,12 @@ net_isolation = "strong"
 syscall_filter = "weak"
 snapshot = "absent"
 
+# 範囲ごとのラベル。その範囲を作業領域に見せたタスクは、このラベルを持つ。
+# 正本は state_dir/store/live にあり、論理パス /data として扱う。
+[[data.labels]]
+path = "/data/mail"
+labels = ["private"]
+
 [demo]
 # 動作確認用のツール（demo.*）を登録する。本番では false にする。
 tools = false

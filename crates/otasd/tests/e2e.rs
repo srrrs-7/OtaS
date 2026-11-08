@@ -291,3 +291,151 @@ fn the_daemon_and_the_cli_work_as_separate_programs() {
     let (ok, out) = otas(&socket, &["pending"]);
     assert!(ok && !out.contains(&task), "{out}");
 }
+
+/// 作業領域：変更はコミットするまで正本に反映されず、ラベルはファイルを通じて次のタスクに伝わる。
+#[test]
+fn edits_wait_in_the_workspace_and_labels_follow_the_files() {
+    run_local(async {
+        let state_dir = std::env::temp_dir().join(format!("otasd-ws-{}", TaskId::new()));
+        // 正本の初期データ（デーモンが最初に開いたときに版 1 として取り込まれる）
+        let live = state_dir.join("store/live");
+        std::fs::create_dir_all(live.join("projects/a")).unwrap();
+        std::fs::create_dir_all(live.join("mail")).unwrap();
+        std::fs::write(live.join("projects/a/notes.md"), "v1").unwrap();
+        std::fs::write(live.join("mail/1.eml"), "私的なメール").unwrap();
+
+        let config = Config::from_toml(&format!(
+            "state_dir = {:?}\nlauncher = {:?}\n\
+             [[data.labels]]\npath = \"/data/mail\"\nlabels = [\"private\"]\n\
+             [demo]\ntools = true\n",
+            state_dir.display().to_string(),
+            launcher().display().to_string(),
+        ))
+        .unwrap();
+        let (daemon, console) = start_daemon(&config).await;
+        assert_eq!(daemon.data_dir(), live);
+
+        // タスク A：メールを読み、メモを書き換え、Web を取得して、送信しようとする
+        let steps = json!([
+            {"read_file": "$OTAS_DATA/mail/1.eml"},
+            {"write_file": "$OTAS_DATA/projects/a/notes.md", "content": "v2"},
+            {"write_file": "$OTAS_DATA/mail/1.eml", "content": "改ざん"},
+            {"tool": "demo.fetch_untrusted"},
+            {"tool": "demo.send"}
+        ]);
+        let request = json!({
+            "program": agent(),
+            "args": [steps.to_string()],
+            "grants": [
+                {"kind": "write", "prefix": "/data/projects/a"},
+                {"kind": "read", "prefix": "/data/mail"},
+                {"kind": "tool", "pattern": "demo.*"}
+            ]
+        });
+        let a = console.submit(&request.to_string()).await.unwrap();
+        let status = wait_for_exit(&console, a).await;
+        assert_eq!(status["state"], "awaiting_review", "{status}");
+        assert_eq!(status["changes"], 1);
+
+        let results = read_lines(&daemon.supervisor().log_dir(a).join("stdout.log"));
+        let kinds: Vec<&str> = results
+            .iter()
+            .map(|r| r["result"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "done",    // 見せた範囲のメールは読める
+                "done",    // 書き込める範囲には書ける（作業領域の中だけ）
+                "error",   // 読み取りだけの範囲には書けない
+                "done",    // Web の取得（私的データ＋外部への作用で条件は 2 つ）
+                "pending", // メールを見せた時点で私的ラベルが付いているので、3 つそろって保留
+            ],
+            "{results:#?}"
+        );
+
+        // コミットするまで正本は変わらない
+        assert_eq!(
+            std::fs::read_to_string(live.join("projects/a/notes.md")).unwrap(),
+            "v1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(live.join("mail/1.eml")).unwrap(),
+            "私的なメール"
+        );
+
+        let diff = console.review(a).await.unwrap();
+        assert_eq!(
+            diff,
+            json!([{"path": "/data/projects/a/notes.md", "kind": "modified"}])
+        );
+
+        let committed = console.commit(a).await.unwrap();
+        assert_eq!(committed["result"], "applied", "{committed}");
+        assert_eq!(committed["version"], 2);
+        assert_eq!(
+            std::fs::read_to_string(live.join("projects/a/notes.md")).unwrap(),
+            "v2"
+        );
+
+        // タスク B：projects/a だけを見せる。メールは見せていないが、A が書いたメモには
+        // A のラベル（私的・信頼できない）が付いているので、送信はすぐに保留される
+        let steps = json!([{"tool": "demo.send"}]);
+        let request = json!({
+            "program": agent(),
+            "args": [steps.to_string()],
+            "grants": [
+                {"kind": "write", "prefix": "/data/projects/a"},
+                {"kind": "tool", "pattern": "demo.*"}
+            ]
+        });
+        let b = console.submit(&request.to_string()).await.unwrap();
+        let status = wait_for_exit(&console, b).await;
+        assert_eq!(status["state"], "exited", "{status}");
+        let results = read_lines(&daemon.supervisor().log_dir(b).join("stdout.log"));
+        assert_eq!(results[0]["result"], "pending", "{results:#?}");
+
+        // 正本の版と巻き戻し
+        let versions = console.versions().await.unwrap();
+        assert_eq!(versions, json!({"current": 2, "versions": [1, 2]}));
+        let rolled = console.rollback(1).await.unwrap();
+        assert_eq!(rolled["version"], 3);
+        assert_eq!(
+            std::fs::read_to_string(live.join("projects/a/notes.md")).unwrap(),
+            "v1"
+        );
+
+        // コミットの書き込みも、ブローカーの判定を通って監査ログに残る
+        let records = FileAuditLog::read_all(config.audit_log()).unwrap();
+        verify_chain(&records).unwrap();
+        assert!(records.iter().any(|r| r.entry.task == a
+            && matches!(&r.entry.action, otas_types::Action::WriteData { path } if path == "/data/projects/a/notes.md")));
+    });
+}
+
+#[test]
+fn discarded_changes_never_reach_the_data() {
+    run_local(async {
+        let config = config("discard");
+        let (daemon, console) = start_daemon(&config).await;
+        let steps = json!([{"write_file": "$OTAS_DATA/projects/x/draft.md", "content": "下書き"}]);
+        let request = json!({
+            "program": agent(),
+            "args": [steps.to_string()],
+            "grants": [{"kind": "write", "prefix": "/data/projects/x"}]
+        });
+        let task = console.submit(&request.to_string()).await.unwrap();
+        assert_eq!(
+            wait_for_exit(&console, task).await["state"],
+            "awaiting_review"
+        );
+
+        console.discard(task).await.unwrap();
+        assert!(!daemon.data_dir().join("projects/x/draft.md").exists());
+        let tasks = console.tasks().await.unwrap();
+        let status = &tasks.iter().find(|(id, _)| *id == task).unwrap().1;
+        assert_eq!(status["state"], "discarded");
+        // 捨てた後はコミットできない
+        assert!(console.commit(task).await.is_err());
+    });
+}

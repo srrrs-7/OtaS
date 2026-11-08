@@ -34,7 +34,10 @@ impl Grant {
     /// この権限で操作が許されるか。
     pub fn permits(&self, action: &Action) -> bool {
         match (self, action) {
-            (Grant::Read { prefix }, Action::ReadData { path }) => path_within(prefix, path),
+            // 書き込める場所は読める（書くには中身が見えている必要がある）
+            (Grant::Read { prefix } | Grant::Write { prefix }, Action::ReadData { path }) => {
+                path_within(prefix, path)
+            }
             (Grant::Write { prefix }, Action::WriteData { path }) => path_within(prefix, path),
             (Grant::Tool { pattern }, Action::CallTool { tool }) => name_matches(pattern, tool),
             (Grant::Model { pattern }, Action::Infer { model }) => name_matches(pattern, model),
@@ -45,7 +48,7 @@ impl Grant {
     /// この権限が `other` を完全に含むか（委任のときの縮小判定に使う）。
     pub fn covers(&self, other: &Grant) -> bool {
         match (self, other) {
-            (Grant::Read { prefix: p }, Grant::Read { prefix: c })
+            (Grant::Read { prefix: p } | Grant::Write { prefix: p }, Grant::Read { prefix: c })
             | (Grant::Write { prefix: p }, Grant::Write { prefix: c }) => path_within(p, c),
             (Grant::Tool { pattern: p }, Grant::Tool { pattern: c })
             | (Grant::Model { pattern: p }, Grant::Model { pattern: c }) => pattern_covers(p, c),
@@ -187,6 +190,19 @@ mod tests {
         assert!(!g.permits(&read_action("/data/projects/a/../b/secret")));
         assert!(!g.permits(&read_action("/data/projects/a/./x")));
         assert!(!g.permits(&read_action("relative/path")));
+    }
+
+    #[test]
+    fn write_implies_read_but_not_the_reverse() {
+        let write = Grant::Write {
+            prefix: "/data/projects/a".into(),
+        };
+        assert!(write.permits(&read_action("/data/projects/a/notes.md")));
+        assert!(write.covers(&read("/data/projects/a/docs")));
+        assert!(!read("/data/projects/a").permits(&Action::WriteData {
+            path: "/data/projects/a/notes.md".into()
+        }));
+        assert!(!read("/data/projects/a").covers(&write));
     }
 
     #[test]

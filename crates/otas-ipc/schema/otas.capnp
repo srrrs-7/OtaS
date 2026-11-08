@@ -82,4 +82,15 @@ interface Console {
   submit @0 (requestJson :Text) -> (taskId :Text);
   tasks @1 () -> (items :List(TaskInfo));
   approver @2 () -> (approver :Approver);
+
+  # 作業領域の変更（JSON）。
+  review @3 (taskId :Text) -> (changesJson :Text);
+  # 作業領域の変更を正本にコミットする。結果（JSON）は反映した版か、衝突したパス。
+  commit @4 (taskId :Text) -> (resultJson :Text);
+  # 作業領域を捨てる。
+  discard @5 (taskId :Text) -> ();
+  # 正本の版の一覧（JSON）。
+  versions @6 () -> (versionsJson :Text);
+  # 正本を指定した版に戻す。結果（JSON）は新しい版。
+  rollback @7 (version :UInt64) -> (resultJson :Text);
 }

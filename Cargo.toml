@@ -10,6 +10,7 @@ members = [
     "crates/otas-ipc",
     "crates/otas-testkit",
     "crates/otas-adapter-linux",
+    "crates/otas-workspace",
     "crates/otasd",
 ]
 
@@ -43,6 +44,7 @@ otas-broker = { path = "crates/otas-broker" }
 otas-ipc = { path = "crates/otas-ipc" }
 otas-testkit = { path = "crates/otas-testkit" }
 otas-adapter-linux = { path = "crates/otas-adapter-linux" }
+otas-workspace = { path = "crates/otas-workspace" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

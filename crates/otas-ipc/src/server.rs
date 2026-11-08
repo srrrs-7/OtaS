@@ -216,7 +216,7 @@ impl approver::Server for ApproverImpl {
         let id = parse_approval(&text(params.get()?.get_id()?)?)?;
         let outcome = self.broker.approve(id).await.map(CallResult::Done);
         write_result(results.get().init_result(), outcome, |done| match done {
-            Completed::Read => Ok("null".to_string()),
+            Completed::Read | Completed::Write => Ok("null".to_string()),
             Completed::Tool(out) => serde_json::to_string(&out.content),
             Completed::Infer(r) => serde_json::to_string(&r.content),
         })
@@ -274,6 +274,22 @@ pub trait ConsoleBackend {
     fn submit(&self, request_json: &str) -> Result<TaskId, String>;
     /// タスクの一覧（ID と、状態の JSON）。
     fn tasks(&self) -> Vec<(TaskId, String)>;
+    /// 作業領域の変更（JSON）。
+    fn review(&self, task: TaskId) -> Result<String, String>;
+    /// 作業領域の変更を正本にコミットする（結果の JSON）。
+    fn commit(&self, task: TaskId) -> Result<String, String>;
+    /// 作業領域を捨てる。
+    fn discard(&self, task: TaskId) -> Result<(), String>;
+    /// 正本の版の一覧（JSON）。
+    fn versions(&self) -> Result<String, String>;
+    /// 正本を指定した版に戻す（結果の JSON）。
+    fn rollback(&self, version: u64) -> Result<String, String>;
+}
+
+fn parse_task(id: &str) -> capnp::Result<TaskId> {
+    uuid::Uuid::parse_str(id)
+        .map(TaskId)
+        .map_err(|e| failed(format!("タスクの ID が不正です: {e}")))
 }
 
 struct ConsoleImpl {
@@ -317,6 +333,58 @@ impl console::Server for ConsoleImpl {
             broker: self.broker.clone(),
         });
         results.get().set_approver(approver);
+        Ok(())
+    }
+
+    async fn review(
+        self: Rc<Self>,
+        params: console::ReviewParams,
+        mut results: console::ReviewResults,
+    ) -> Result<(), capnp::Error> {
+        let task = parse_task(&text(params.get()?.get_task_id()?)?)?;
+        let json = self.backend.review(task).map_err(failed)?;
+        results.get().set_changes_json(json);
+        Ok(())
+    }
+
+    async fn commit(
+        self: Rc<Self>,
+        params: console::CommitParams,
+        mut results: console::CommitResults,
+    ) -> Result<(), capnp::Error> {
+        let task = parse_task(&text(params.get()?.get_task_id()?)?)?;
+        let json = self.backend.commit(task).map_err(failed)?;
+        results.get().set_result_json(json);
+        Ok(())
+    }
+
+    async fn discard(
+        self: Rc<Self>,
+        params: console::DiscardParams,
+        _results: console::DiscardResults,
+    ) -> Result<(), capnp::Error> {
+        let task = parse_task(&text(params.get()?.get_task_id()?)?)?;
+        self.backend.discard(task).map_err(failed)
+    }
+
+    async fn versions(
+        self: Rc<Self>,
+        _params: console::VersionsParams,
+        mut results: console::VersionsResults,
+    ) -> Result<(), capnp::Error> {
+        let json = self.backend.versions().map_err(failed)?;
+        results.get().set_versions_json(json);
+        Ok(())
+    }
+
+    async fn rollback(
+        self: Rc<Self>,
+        params: console::RollbackParams,
+        mut results: console::RollbackResults,
+    ) -> Result<(), capnp::Error> {
+        let version = params.get()?.get_version();
+        let json = self.backend.rollback(version).map_err(failed)?;
+        results.get().set_result_json(json);
         Ok(())
     }
 }

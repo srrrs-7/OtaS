@@ -6,13 +6,25 @@
 //! otas [--socket <パス>] pending                        承認待ちの一覧
 //! otas [--socket <パス>] approve <承認待ちの ID>         承認して実行する
 //! otas [--socket <パス>] reject <承認待ちの ID>          却下する
+//! otas [--socket <パス>] diff <タスクの ID>              作業領域の変更を見る
+//! otas [--socket <パス>] commit <タスクの ID>            変更を正本にコミットする
+//! otas [--socket <パス>] discard <タスクの ID>           変更を捨てる
+//! otas [--socket <パス>] versions                       正本の版の一覧
+//! otas [--socket <パス>] rollback <版>                  正本を指定した版に戻す
 //! ```
 //!
 //! ソケットは `--socket` か、環境変数 `OTAS_SOCKET` で指定する。
 
 use std::process::ExitCode;
 
-const USAGE: &str = "使い方: otas [--socket <パス>] <submit <ファイル> | tasks | pending | approve <ID> | reject <ID>>";
+const USAGE: &str = "使い方: otas [--socket <パス>] <submit <ファイル> | tasks | pending | approve <ID> | reject <ID> | diff <タスク> | commit <タスク> | discard <タスク> | versions | rollback <版>>";
+
+#[cfg(unix)]
+fn parse_task(id: &str) -> Result<otas_types::TaskId, String> {
+    uuid::Uuid::parse_str(id)
+        .map(otas_types::TaskId)
+        .map_err(|e| format!("タスクの ID が不正です: {e}"))
+}
 
 #[cfg(unix)]
 fn main() -> ExitCode {
@@ -119,6 +131,46 @@ async fn run(socket: &str, args: &[String]) -> Result<ExitCode, String> {
                 .await
                 .map_err(err)?;
             println!("却下しました");
+        }
+        ["diff", id] => {
+            let changes = console.review(parse_task(id)?).await.map_err(err)?;
+            for change in changes.as_array().into_iter().flatten() {
+                println!(
+                    "{}\t{}",
+                    change["kind"].as_str().unwrap_or("?"),
+                    change["path"].as_str().unwrap_or("?")
+                );
+            }
+        }
+        ["commit", id] => {
+            let result = console.commit(parse_task(id)?).await.map_err(err)?;
+            match result["result"].as_str() {
+                Some("applied") => println!("コミットしました（版 {}）", result["version"]),
+                Some("conflict") => {
+                    println!("衝突したのでコミットしませんでした: {}", result["paths"]);
+                    return Ok(ExitCode::FAILURE);
+                }
+                _ => println!("変更はありませんでした"),
+            }
+        }
+        ["discard", id] => {
+            console.discard(parse_task(id)?).await.map_err(err)?;
+            println!("変更を捨てました");
+        }
+        ["versions"] => {
+            let v = console.versions().await.map_err(err)?;
+            println!("現在の版: {}", v["current"]);
+            println!("版の一覧: {}", v["versions"]);
+        }
+        ["rollback", version] => {
+            let version: u64 = version
+                .parse()
+                .map_err(|_| format!("版は数字で指定してください: {version}"))?;
+            let result = console.rollback(version).await.map_err(err)?;
+            println!(
+                "版 {version} に戻しました（新しい版 {}）",
+                result["version"]
+            );
         }
         _ => {
             eprintln!("{USAGE}");
