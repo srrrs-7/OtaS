@@ -23,6 +23,9 @@ pub enum DaemonError {
     /// 作業領域を開けない。
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
+    /// モデルの設定が不正、または API キーが見つからない。
+    #[error(transparent)]
+    Model(#[from] otas_models::ModelConfigError),
     /// ディレクトリやソケットの操作に失敗した。
     #[error("入出力に失敗しました: {0}")]
     Io(#[from] std::io::Error),
@@ -61,6 +64,9 @@ impl Daemon {
             for tool in demo::tools() {
                 builder = builder.tool(tool);
             }
+        }
+        for model in &config.models {
+            builder = builder.model(otas_models::build_from_env(model)?);
         }
         let broker = Arc::new(builder.build());
         let supervisor = Rc::new(Supervisor::new(

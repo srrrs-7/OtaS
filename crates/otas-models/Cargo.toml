@@ -1,0 +1,23 @@
+[package]
+name = "otas-models"
+description = "OtaS のモデルのアダプタ（Claude API・OpenAI 互換 API）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+otas-ports.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "net", "io-util", "time"] }
+toml.workspace = true
+
+[lints]
+workspace = true

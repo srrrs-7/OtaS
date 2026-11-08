@@ -29,6 +29,9 @@ pub struct Config {
     /// データ（正本）の設定。
     #[serde(default)]
     pub data: DataConfig,
+    /// モデル。API キーはデーモンの中だけに置き、エージェントには渡さない。
+    #[serde(default)]
+    pub models: Vec<otas_models::ModelConfig>,
     /// 動作確認用の設定。
     #[serde(default)]
     pub demo: DemoConfig,
@@ -167,6 +170,29 @@ mod tests {
         .unwrap();
         assert_eq!(c.data.labels[0].path, "/data/mail");
         assert!(c.data.labels[0].labels.contains(otas_types::Label::Private));
+    }
+
+    #[test]
+    fn models_are_read() {
+        let c = Config::from_toml(
+            r#"
+            state_dir = "/x"
+            launcher = "/y"
+            [[models]]
+            id = "claude"
+            provider = "anthropic"
+            api_key_env = "ANTHROPIC_API_KEY"
+            [[models]]
+            id = "local"
+            provider = "openai_compatible"
+            model = "llama3"
+            base_url = "http://127.0.0.1:11434/v1"
+            local = true
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.models.len(), 2);
+        assert_eq!(c.models[1].id, "local");
     }
 
     #[test]

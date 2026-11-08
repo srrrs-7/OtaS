@@ -23,6 +23,7 @@ async-trait.workspace = true
 otas-audit.workspace = true
 otas-broker.workspace = true
 otas-ipc.workspace = true
+otas-models.workspace = true
 otas-policy.workspace = true
 otas-ports.workspace = true
 otas-types.workspace = true

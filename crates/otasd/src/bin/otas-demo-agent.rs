@@ -10,7 +10,8 @@
 //!   {"tool": "demo.send", "args": {"to": "someone@example.com"}},
 //!   {"read_file": "$OTAS_DATA/mail/1.eml"},
 //!   {"write_file": "$OTAS_DATA/projects/a/notes.md", "content": "v2"},
-//!   {"read_file": "/etc/passwd"}
+//!   {"read_file": "/etc/passwd"},
+//!   {"infer": "local", "prompt": "要約して"}
 //! ]
 //! ```
 //!
@@ -45,6 +46,12 @@ enum Step {
     WriteFile {
         write_file: PathBuf,
         content: String,
+    },
+    Infer {
+        infer: String,
+        prompt: String,
+        #[serde(default)]
+        max_tokens: Option<u32>,
     },
 }
 
@@ -102,6 +109,33 @@ async fn run(steps: Vec<Step>) -> ExitCode {
                     json!({"step": i, "tool": tool, "result": "error", "error": e.to_string()})
                 }
             },
+            Step::Infer {
+                infer,
+                prompt,
+                max_tokens,
+            } => {
+                let request = otas_ports::InferRequest {
+                    messages: vec![otas_ports::Message {
+                        role: otas_ports::Role::User,
+                        content: prompt,
+                    }],
+                    max_tokens: max_tokens.unwrap_or(1024),
+                };
+                match client.infer(&infer, &request).await {
+                    Ok(Remote::Done(text)) => {
+                        json!({"step": i, "infer": infer, "result": "done", "text": text})
+                    }
+                    Ok(Remote::Pending(id)) => {
+                        json!({"step": i, "infer": infer, "result": "pending", "approval": id.0})
+                    }
+                    Ok(Remote::Denied(reason)) => {
+                        json!({"step": i, "infer": infer, "result": "denied", "reason": reason})
+                    }
+                    Err(e) => {
+                        json!({"step": i, "infer": infer, "result": "error", "error": e.to_string()})
+                    }
+                }
+            }
             Step::WriteFile {
                 write_file,
                 content,

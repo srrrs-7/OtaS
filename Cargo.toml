@@ -11,6 +11,7 @@ members = [
     "crates/otas-testkit",
     "crates/otas-adapter-linux",
     "crates/otas-workspace",
+    "crates/otas-models",
     "crates/otasd",
 ]
 
@@ -26,6 +27,7 @@ capnp = "0.27"
 capnp-rpc = "0.27"
 capnpc = "0.27"
 futures = "0.3"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2"] }
 tokio-util = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -45,6 +47,7 @@ otas-ipc = { path = "crates/otas-ipc" }
 otas-testkit = { path = "crates/otas-testkit" }
 otas-adapter-linux = { path = "crates/otas-adapter-linux" }
 otas-workspace = { path = "crates/otas-workspace" }
+otas-models = { path = "crates/otas-models" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

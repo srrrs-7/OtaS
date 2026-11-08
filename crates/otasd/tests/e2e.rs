@@ -439,3 +439,155 @@ fn discarded_changes_never_reach_the_data() {
         assert!(console.commit(task).await.is_err());
     });
 }
+
+/// ループバックで動く偽の HTTP サーバ。どの要求にも同じ本文を返し、受け取った要求の先頭部分を記録する。
+async fn fake_http(body: String) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0u8; 65536];
+            let mut len = 0;
+            // 先頭と本文を読み切る（content-length の分だけ）
+            loop {
+                let n = socket.read(&mut buf[len..]).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                len += n;
+                let text = String::from_utf8_lossy(&buf[..len]).to_string();
+                if let Some(pos) = text.find("\r\n\r\n") {
+                    let want = text[..pos]
+                        .lines()
+                        .find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            k.eq_ignore_ascii_case("content-length")
+                                .then(|| v.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    if len >= pos + 4 + want {
+                        break;
+                    }
+                }
+            }
+            log.lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&buf[..len]).to_string());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    (format!("http://{addr}"), seen)
+}
+
+/// モデル：エージェントは API キーに触れられず、クラウドのモデルへの送信は Rule of Two で保留される。
+#[test]
+fn agents_use_models_only_through_the_broker() {
+    run_local(async {
+        let (local_url, _) = fake_http(
+            json!({"choices": [{"message": {"content": "ローカルの応答"}, "finish_reason": "stop"}]})
+                .to_string(),
+        )
+        .await;
+        let (claude_url, claude_seen) = fake_http(
+            json!({"stop_reason": "end_turn", "content": [{"type": "text", "text": "Claude の応答"}]})
+                .to_string(),
+        )
+        .await;
+
+        let state_dir = std::env::temp_dir().join(format!("otasd-models-{}", TaskId::new()));
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let key_file = state_dir.join("anthropic.key");
+        std::fs::write(&key_file, "sk-ant-e2e-secret\n").unwrap();
+
+        let config = Config::from_toml(&format!(
+            "state_dir = {state:?}\nlauncher = {launcher:?}\n\
+             [demo]\ntools = true\n\
+             [[models]]\nid = \"local\"\nprovider = \"openai_compatible\"\nmodel = \"llama3\"\n\
+             base_url = \"{local_url}/v1\"\nlocal = true\n\
+             [[models]]\nid = \"claude\"\nprovider = \"anthropic\"\nbase_url = \"{claude_url}\"\n\
+             api_key_file = {key:?}\n",
+            state = state_dir.display().to_string(),
+            launcher = launcher().display().to_string(),
+            key = key_file.display().to_string(),
+        ))
+        .unwrap();
+        let (daemon, console) = start_daemon(&config).await;
+
+        let steps = json!([
+            {"read_file": key_file},
+            {"tool": "demo.read_private"},
+            {"tool": "demo.fetch_untrusted"},
+            {"infer": "local", "prompt": "要約して"},
+            {"infer": "claude", "prompt": "要約して"}
+        ]);
+        let request = json!({
+            "program": agent(),
+            "args": [steps.to_string()],
+            "grants": [
+                {"kind": "tool", "pattern": "demo.*"},
+                {"kind": "model", "pattern": "*"}
+            ]
+        });
+        let task = console.submit(&request.to_string()).await.unwrap();
+        let status = wait_for_exit(&console, task).await;
+        assert_eq!(status["state"], "exited", "{status}");
+
+        let results = read_lines(&daemon.supervisor().log_dir(task).join("stdout.log"));
+        let kinds: Vec<&str> = results
+            .iter()
+            .map(|r| r["result"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "error",   // API キーのファイルはサンドボックスから読めない
+                "done",    // 私的データ
+                "done",    // 信頼できない入力
+                "done",    // ローカルのモデルは外に出ないので通る
+                "pending", // クラウドのモデルへの送信は 3 条件がそろうので保留
+            ],
+            "{results:#?}"
+        );
+        assert_eq!(results[3]["text"], "ローカルの応答");
+        // 保留中は、クラウドに何も送っていない
+        assert!(claude_seen.lock().unwrap().is_empty());
+
+        // 承認すると、デーモンが API キーを付けて送る
+        let approver = console.approver();
+        let pending = approver.pending().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        let done = approver.approve(pending[0].id).await.unwrap();
+        assert_eq!(done, Remote::Done(json!("Claude の応答")));
+        let sent = claude_seen.lock().unwrap()[0].clone();
+        assert!(
+            sent.to_ascii_lowercase()
+                .contains("x-api-key: sk-ant-e2e-secret"),
+            "{sent}"
+        );
+    });
+}
+
+#[test]
+fn a_missing_api_key_stops_the_daemon_from_starting() {
+    let state_dir = std::env::temp_dir().join(format!("otasd-nokey-{}", TaskId::new()));
+    let config = Config::from_toml(&format!(
+        "state_dir = {state:?}\nlauncher = {launcher:?}\n\
+         [[models]]\nid = \"claude\"\nprovider = \"anthropic\"\napi_key_env = \"OTAS_TEST_KEY_THAT_DOES_NOT_EXIST\"\n",
+        state = state_dir.display().to_string(),
+        launcher = launcher().display().to_string(),
+    ))
+    .unwrap();
+    let sandbox = LinuxSandbox::detect(&config.launcher).unwrap();
+    let result = Daemon::new(config, Arc::new(sandbox));
+    assert!(matches!(result, Err(otasd::DaemonError::Model(_))));
+}

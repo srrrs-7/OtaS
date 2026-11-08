@@ -23,6 +23,25 @@ snapshot = "absent"
 path = "/data/mail"
 labels = ["private"]
 
+# モデル。エージェントは id で指定し、権限 {"kind": "model", "pattern": "<id>"} で使えるようになる。
+# API キーは設定ファイルに書かず、環境変数名（api_key_env）かファイル（api_key_file）で渡す。
+# キーはデーモンの中だけで使い、サンドボックスのエージェントには渡さない。
+[[models]]
+id = "claude"
+provider = "anthropic"
+model = "claude-opus-5-5"
+api_key_env = "ANTHROPIC_API_KEY"
+effort = "high"            # low / medium / high / xhigh / max
+# fallbacks = true         # 分類器に断られたとき、サーバ側で別のモデルに切り替える（既定で有効）
+
+# ローカルモデル（Ollama の例）。local = true はループバックアドレスのときだけ指定できる。
+[[models]]
+id = "local"
+provider = "openai_compatible"
+model = "llama3.1"
+base_url = "http://127.0.0.1:11434/v1"
+local = true
+
 [demo]
 # 動作確認用のツール（demo.*）を登録する。本番では false にする。
 tools = false

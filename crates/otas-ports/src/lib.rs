@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use otas_types::{
     AccessRequest, AuditEntry, AuditRecord, Decision, Effect, GrantSet, Guarantees, LabelSet,
 };
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // ポリシー
@@ -151,7 +152,8 @@ impl ModelCaps {
 }
 
 /// メッセージの役割。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Role {
     /// システムの指示。
     System,
@@ -162,7 +164,7 @@ pub enum Role {
 }
 
 /// 推論に渡すメッセージ。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     /// 役割。
     pub role: Role,
@@ -171,7 +173,7 @@ pub struct Message {
 }
 
 /// 推論の要求。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InferRequest {
     /// これまでの会話。
     pub messages: Vec<Message>,
@@ -195,6 +197,9 @@ pub enum ModelError {
     /// 推論に失敗した。
     #[error("推論に失敗しました: {0}")]
     Failed(String),
+    /// モデル（または安全のための分類器）が応答を断った。
+    #[error("モデルが応答を断りました（{0}）")]
+    Refused(String),
 }
 
 /// モデルの提供者（Claude API、ローカルモデル、OpenAI 互換 API などを同じ形で扱う）。
