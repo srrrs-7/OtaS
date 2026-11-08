@@ -52,7 +52,7 @@ AI エージェントにすべての作業を依頼する、Linux ベースの O
 
 ```sh
 make up                                     # 手元でイメージをビルドして otasd を起動
-make up IMAGE=ghcr.io/srrrs-7/otas:0.1.2    # 公開されたイメージで起動
+make up IMAGE=ghcr.io/srrrs-7/otas:0.1.3    # 公開されたイメージで起動
 make otas ARGS=tasks                        # CLI（submit・diff・commit なども同じ）
 make logs / make status / make down
 make test / make test-privileged / make lint
@@ -67,7 +67,7 @@ docker run -d --name otasd \
   --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp \
   --memory 2g --pids-limit 256 \
   -v otas-state:/var/lib/otas \
-  ghcr.io/srrrs-7/otas:0.1.2
+  ghcr.io/srrrs-7/otas:0.1.3
 
 docker exec otasd otas tasks          # CLI は同じコンテナの中で使う
 ```

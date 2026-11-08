@@ -837,7 +837,7 @@ checksum = "7e036b411754132fd6b74e94b74e9a13c5cf606fa93d1885c35860d3060820b1"
 
 [[package]]
 name = "otas-adapter-linux"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "landlock",
  "libc",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "otas-audit"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "otas-ports",
  "otas-types",
@@ -863,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "otas-broker"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "otas-audit",
@@ -880,14 +880,14 @@ dependencies = [
 
 [[package]]
 name = "otas-ifc"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "otas-types",
 ]
 
 [[package]]
 name = "otas-ipc"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "capnp",
  "capnp-rpc",
@@ -908,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "otas-models"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "otas-ports",
@@ -922,7 +922,7 @@ dependencies = [
 
 [[package]]
 name = "otas-policy"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "otas-ifc",
  "otas-ports",
@@ -931,7 +931,7 @@ dependencies = [
 
 [[package]]
 name = "otas-ports"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "otas-types",
@@ -942,7 +942,7 @@ dependencies = [
 
 [[package]]
 name = "otas-state"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "otas-ports",
  "otas-types",
@@ -950,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "otas-testkit"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "otas-audit",
@@ -963,7 +963,7 @@ dependencies = [
 
 [[package]]
 name = "otas-types"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -972,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "otas-workspace"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "nix",
  "otas-ports",
@@ -984,7 +984,7 @@ dependencies = [
 
 [[package]]
 name = "otasd"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "otas-adapter-linux",
