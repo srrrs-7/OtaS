@@ -1,0 +1,32 @@
+# OtaS を Docker で動かす例。
+#
+#   docker compose -f packaging/docker/compose.yml up -d
+#   docker compose -f packaging/docker/compose.yml exec otasd otas tasks
+#
+# 権限は最小限にしている（ケーパビリティなし・ルートは読み取り専用）。
+# タスク全体の資源の上限は、コンテナの上限（mem_limit・pids_limit）でかける。
+name: otas
+
+services:
+  otasd:
+    image: ghcr.io/srrrs-7/otas:0.1.0
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 2g
+    pids_limit: 256
+    environment:
+      # モデルを使う場合だけ（設定の [[models]] で api_key_env に指定した名前）
+      - ANTHROPIC_API_KEY
+    volumes:
+      - otas-state:/var/lib/otas
+      # 設定を差し替える場合:
+      # - ./otasd.toml:/etc/otas/otasd.toml:ro
+
+volumes:
+  otas-state:

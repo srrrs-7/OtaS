@@ -1,0 +1,116 @@
+# 配布用イメージを GHCR に公開する。
+#
+# v で始まるタグ（例: v0.1.0）を push すると動く:
+#   1. コンテナの中でテスト・clippy・fmt（特権のテストも）
+#   2. イメージをビルドして脆弱性をスキャン（重大なものがあれば止める）
+#   3. amd64 と arm64 のイメージを ghcr.io/<owner>/otas に push
+#      SBOM と来歴の証明（provenance）を付け、cosign で署名する（鍵なし。GitHub の OIDC を使う）
+#
+# 初めて push したパッケージは非公開になる。公開するときは GitHub のパッケージの設定で public に変える。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/otas
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: タグと Cargo.toml の版が一致するか
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v${version}" = "${GITHUB_REF_NAME}" \
+            || { echo "タグ ${GITHUB_REF_NAME} と Cargo.toml の版 ${version} が一致しません"; exit 1; }
+
+      - name: テスト
+        run: docker compose run --build --rm dev
+
+      - name: clippy と fmt
+        run: |
+          docker compose run --rm dev cargo clippy --workspace --all-targets -- -D warnings
+          docker compose run --rm dev cargo fmt --all --check
+
+      - name: 特権のテスト（名前空間・OverlayFS・Btrfs・cgroups）
+        run: docker compose run --rm dev-privileged
+
+  image:
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write # GHCR への push
+      id-token: write # cosign の鍵なし署名
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      # まず amd64 だけをビルドしてスキャンする（push はしない）
+      - name: スキャン用にビルド
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packaging/docker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: otas:scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 脆弱性のスキャン
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: otas:scan
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - id: push
+        name: ビルドして push（amd64・arm64）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packaging/docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: 署名
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"

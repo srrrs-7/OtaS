@@ -1,0 +1,24 @@
+# 配布用イメージの既定の設定。
+# 変えるときは、このファイルを読み取り専用でマウントして差し替える:
+#   -v ./otasd.toml:/etc/otas/otasd.toml:ro
+
+state_dir = "/var/lib/otas"
+launcher = "/usr/local/libexec/otas-sandbox-exec"
+
+# Docker の中では landlock（特権不要）を使う。
+# namespace は --privileged が、rootless はユーザー名前空間が必要で、どちらも Docker の既定では動かない。
+[sandbox]
+mode = "landlock"
+
+[data]
+versions = "hardlink"
+
+# モデルを使うときは、この設定を差し替えて [[models]] を足す。
+# API キーは設定に書かず、環境変数（-e ANTHROPIC_API_KEY）か Docker の secrets（api_key_file）で渡す。
+#
+# [[models]]
+# id = "claude"
+# provider = "anthropic"
+# model = "claude-opus-5-5"
+# api_key_env = "ANTHROPIC_API_KEY"
+# effort = "high"

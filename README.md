@@ -46,6 +46,30 @@ AI エージェントにすべての作業を依頼する、Linux ベースの O
 
 設定の例は [config/otasd.example.toml](config/otasd.example.toml)、依頼から承認までの通しの流れは `crates/otasd/tests/e2e.rs` を参照してください。
 
+## Docker イメージで動かす
+
+`otasd` を Docker のサービスとして動かせます。サンドボックスは `landlock`（特権不要）で、ホストのカーネルは 6.7 以降が必要です（Landlock ABI v4。満たさなければ起動を拒否します）。
+
+```sh
+docker run -d --name otasd \
+  --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp \
+  --memory 2g --pids-limit 256 \
+  -v otas-state:/var/lib/otas \
+  ghcr.io/srrrs-7/otas:0.1.0
+
+docker exec otasd otas tasks          # CLI は同じコンテナの中で使う
+```
+
+- 設定は `/etc/otas/otasd.toml`（既定は [packaging/docker/otasd.toml](packaging/docker/otasd.toml)）。差し替えるときは読み取り専用でマウントします。
+- API キーはイメージや設定に入れず、環境変数か Docker の secrets（`api_key_file`）で渡します。
+- タスク全体の資源の上限は、コンテナの上限（`--memory`・`--pids-limit`）でかけます。
+- `namespace`（`--privileged` が必要）と `rootless`（ユーザー名前空間が必要）は、Docker の既定では使えません。
+- compose の例は [packaging/docker/compose.yml](packaging/docker/compose.yml)。
+
+イメージのビルド：`docker build -f packaging/docker/Dockerfile -t otas:local .`
+
+公開は `v<版>` のタグを push すると GitHub Actions（[.github/workflows/release.yml](.github/workflows/release.yml)）が行います。テスト → 脆弱性スキャン → amd64・arm64 のビルド → GHCR への push → SBOM・来歴の証明・cosign の署名、の順です。
+
 ## 開発
 
 ビルドとテストは、すべてコンテナの中で行います。ホストのディレクトリはマウントせず、ソースはイメージのビルド時にコピーします。
