@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use otas_audit::{MemoryAuditLog, verify_chain};
-use otas_broker::{Broker, BrokerError, CallResult, Completed};
+use otas_broker::{ApprovalState, Broker, BrokerError, CallResult, Completed, Resolution};
 use otas_policy::DefaultPolicy;
 use otas_ports::{
     InferRequest, InferResponse, ModelCaps, ModelError, ModelProvider, Role, ToolError, ToolOutput,
@@ -274,6 +274,65 @@ async fn a_rejected_call_never_runs() {
         w.audit.records().last().unwrap().entry.outcome,
         Outcome::Rejected { .. }
     ));
+}
+
+/// 承認待ちのタスクは、人間の判断を待ち、決着した結果を1回だけ受け取れる。他のタスクには見えない。
+#[tokio::test]
+async fn a_waiting_task_receives_the_outcome_of_its_approval_once() {
+    let w = world();
+    let task = w.broker.spawn_task(all_tools());
+    let other = w.broker.spawn_task(all_tools());
+    w.broker
+        .call_tool(task, "mail.read", json!({}))
+        .await
+        .unwrap();
+    w.broker
+        .call_tool(task, "web.fetch", json!({}))
+        .await
+        .unwrap();
+    let send = |to: &'static str| {
+        let broker = &w.broker;
+        async move {
+            broker
+                .call_tool(task, "mail.send", json!({ "to": to }))
+                .await
+                .unwrap()
+                .pending()
+                .unwrap()
+        }
+    };
+
+    // 承認：待っている間は Waiting、承認すると実行結果を受け取る
+    let approved = send("a@example.com").await;
+    assert_eq!(
+        w.broker.poll_approval(task, approved).unwrap(),
+        ApprovalState::Waiting
+    );
+    assert!(matches!(
+        w.broker.poll_approval(other, approved),
+        Err(BrokerError::UnknownApproval(_))
+    ));
+    w.broker.approve(approved).await.unwrap();
+    match w.broker.poll_approval(task, approved).unwrap() {
+        ApprovalState::Resolved(Resolution::Done(Completed::Tool(out))) => {
+            assert_eq!(out.content["args"]["to"], "a@example.com");
+        }
+        other => panic!("実行結果を受け取るはず: {other:?}"),
+    }
+    // 受け取るのは1回だけ
+    assert!(matches!(
+        w.broker.poll_approval(task, approved),
+        Err(BrokerError::UnknownApproval(_))
+    ));
+
+    // 却下：実行されず、却下されたことを受け取る
+    let rejected = send("b@example.com").await;
+    w.broker.reject(rejected).unwrap();
+    assert_eq!(
+        w.broker.poll_approval(task, rejected).unwrap(),
+        ApprovalState::Resolved(Resolution::Rejected)
+    );
+    assert_eq!(w.mail_send.calls(), 1);
 }
 
 #[tokio::test]

@@ -602,6 +602,41 @@ impl ConsoleBackend for Supervisor {
             .map_err(|e| e.to_string())?;
         Ok(json!({ "version": new }).to_string())
     }
+
+    fn output(&self, task: TaskId, offset: u64) -> Result<(String, u64), String> {
+        if self.status(task).is_none() {
+            return Err(format!("タスク {} はありません", task.0));
+        }
+        read_lines_from(&self.log_dir(task).join("stdout.log"), offset).map_err(|e| e.to_string())
+    }
+}
+
+/// 1回に返す出力の上限（バイト）。
+const OUTPUT_CHUNK: u64 = 64 * 1024;
+
+/// ファイルを `offset` バイト目から、完全な行だけ読む。読んだ文字列と次に読む位置を返す。
+/// 上限まで改行がない長い行は、そこまでを返す（読み手が止まらないように）。
+fn read_lines_from(path: &Path, offset: u64) -> std::io::Result<(String, u64)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        // 起動の途中でまだ作られていない
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((String::new(), offset)),
+        Err(e) => return Err(e),
+    };
+    file.seek(SeekFrom::Start(offset))?;
+    let mut buf = Vec::new();
+    file.take(OUTPUT_CHUNK).read_to_end(&mut buf)?;
+    let end = match buf.iter().rposition(|b| *b == b'\n') {
+        Some(i) => i + 1,
+        None if buf.len() as u64 == OUTPUT_CHUNK => buf.len(),
+        None => 0,
+    };
+    buf.truncate(end);
+    Ok((
+        String::from_utf8_lossy(&buf).into_owned(),
+        offset + end as u64,
+    ))
 }
 
 #[cfg(test)]
@@ -609,6 +644,23 @@ mod tests {
     use super::*;
     use otas_ports::ViewEntry;
     use otas_types::LabelSet;
+
+    #[test]
+    fn output_is_read_in_whole_lines() {
+        let dir = std::env::temp_dir().join(format!("otas-out-{}", TaskId::new().0));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stdout.log");
+        assert_eq!(read_lines_from(&path, 0).unwrap(), (String::new(), 0));
+
+        std::fs::write(&path, "一行目\n二行目\n書きかけ").unwrap();
+        let (text, next) = read_lines_from(&path, 0).unwrap();
+        assert_eq!(text, "一行目\n二行目\n");
+        // 書きかけの行は、改行が来るまで返さない
+        assert_eq!(read_lines_from(&path, next).unwrap(), (String::new(), next));
+        std::fs::write(&path, "一行目\n二行目\n書きかけ終わり\n").unwrap();
+        assert_eq!(read_lines_from(&path, next).unwrap().0, "書きかけ終わり\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn the_view_comes_from_grants() {

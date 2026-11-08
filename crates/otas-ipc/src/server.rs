@@ -4,7 +4,7 @@ use crate::convert::{read_labels, role_from_wire, text, write_labels};
 use crate::otas_capnp::{approver, call_result, console, task_session};
 use capnp::capability::Rc;
 use capnp_rpc::{CapabilityServerSet, RpcSystem, rpc_twoparty_capnp, twoparty};
-use otas_broker::{Broker, BrokerError, CallResult, Completed};
+use otas_broker::{ApprovalState, Broker, BrokerError, CallResult, Completed, Resolution};
 use otas_ports::{InferRequest, Message};
 use otas_types::{ApprovalId, GrantSet, TaskId};
 use std::cell::RefCell;
@@ -184,6 +184,31 @@ impl task_session::Server for TaskSessionImpl {
         Ok(())
     }
 
+    async fn wait_approval(
+        self: Rc<Self>,
+        params: task_session::WaitApprovalParams,
+        mut results: task_session::WaitApprovalResults,
+    ) -> Result<(), capnp::Error> {
+        let id = parse_approval(&text(params.get()?.get_id()?)?)?;
+        // 人間の判断は数秒から数分かかる。短い間隔で確かめる
+        let resolution = loop {
+            match self.broker().poll_approval(self.task, id).map_err(failed)? {
+                ApprovalState::Waiting => {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                ApprovalState::Resolved(r) => break r,
+            }
+        };
+        let mut builder = results.get().init_result();
+        match resolution {
+            Resolution::Done(done) => builder.set_done(completed_json(done).map_err(failed)?),
+            Resolution::Denied(reason) => builder.set_denied(reason),
+            Resolution::Rejected => builder.set_denied("人間が却下しました"),
+            Resolution::Failed(reason) => return Err(failed(reason)),
+        }
+        Ok(())
+    }
+
     async fn delegate(
         self: Rc<Self>,
         params: task_session::DelegateParams,
@@ -215,6 +240,15 @@ impl task_session::Server for TaskSessionImpl {
         self.broker()
             .absorb_child(self.task, child_task)
             .map_err(failed)
+    }
+}
+
+/// 承認されて実行された操作の結果を、元の操作と同じ形の JSON にする（推論は InferResponse 全体）。
+fn completed_json(done: Completed) -> Result<String, serde_json::Error> {
+    match done {
+        Completed::Read | Completed::Write => Ok("null".to_string()),
+        Completed::Tool(out) => serde_json::to_string(&out.content),
+        Completed::Infer(r) => serde_json::to_string(&r),
     }
 }
 
@@ -253,10 +287,10 @@ impl approver::Server for ApproverImpl {
     ) -> Result<(), capnp::Error> {
         let id = parse_approval(&text(params.get()?.get_id()?)?)?;
         let outcome = self.broker.approve(id).await.map(CallResult::Done);
+        // 人間に見せる結果なので、推論は本文だけにする
         write_result(results.get().init_result(), outcome, |done| match done {
-            Completed::Read | Completed::Write => Ok("null".to_string()),
-            Completed::Tool(out) => serde_json::to_string(&out.content),
             Completed::Infer(r) => serde_json::to_string(&r.content),
+            other => completed_json(other),
         })
     }
 
@@ -322,6 +356,8 @@ pub trait ConsoleBackend {
     fn versions(&self) -> Result<String, String>;
     /// 正本を指定した版に戻す（結果の JSON）。
     fn rollback(&self, version: u64) -> Result<String, String>;
+    /// タスクの標準出力を `offset` バイト目から読む。読んだ文字列と、次に読む位置を返す。
+    fn output(&self, task: TaskId, offset: u64) -> Result<(String, u64), String>;
 }
 
 fn parse_task(id: &str) -> capnp::Result<TaskId> {
@@ -423,6 +459,22 @@ impl console::Server for ConsoleImpl {
         let version = params.get()?.get_version();
         let json = self.backend.rollback(version).map_err(failed)?;
         results.get().set_result_json(json);
+        Ok(())
+    }
+
+    async fn output(
+        self: Rc<Self>,
+        params: console::OutputParams,
+        mut results: console::OutputResults,
+    ) -> Result<(), capnp::Error> {
+        let (task, offset) = {
+            let p = params.get()?;
+            (parse_task(&text(p.get_task_id()?)?)?, p.get_offset())
+        };
+        let (out, next) = self.backend.output(task, offset).map_err(failed)?;
+        let mut r = results.get();
+        r.set_text(out);
+        r.set_next(next);
         Ok(())
     }
 }

@@ -15,7 +15,7 @@ otas-ports.workspace = true
 otas-types.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["net", "rt"] }
+tokio = { workspace = true, features = ["net", "rt", "time"] }
 tokio-util = { workspace = true, features = ["compat"] }
 uuid.workspace = true
 

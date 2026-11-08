@@ -108,6 +108,28 @@ pub enum Completed {
     Infer(InferResponse),
 }
 
+/// 承認待ちの操作がどう決着したか。タスクが [`Broker::poll_approval`] で受け取る。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Resolution {
+    /// 承認されて実行された。
+    Done(Completed),
+    /// 承認後の再判定で拒否された。
+    Denied(String),
+    /// 人間が却下した。
+    Rejected,
+    /// 承認されたが、実行に失敗した。
+    Failed(String),
+}
+
+/// 承認待ちの操作の、いまの状態。
+#[derive(Debug, Clone, PartialEq)]
+pub enum ApprovalState {
+    /// まだ決着していない（人間の判断を待っている、または承認後に実行している）。
+    Waiting,
+    /// 決着した。結果は1回だけ受け取れる。
+    Resolved(Resolution),
+}
+
 /// 人間に見せる承認待ちの一覧の1件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingApproval {
@@ -204,6 +226,7 @@ impl BrokerBuilder {
             tools: self.tools,
             models: self.models,
             state: Mutex::new(State::default()),
+            resolutions: Mutex::new(HashMap::new()),
             store: self.store,
         }
     }
@@ -217,6 +240,10 @@ pub struct Broker {
     tools: HashMap<String, Arc<dyn ToolProvider>>,
     models: HashMap<String, Arc<dyn ModelProvider>>,
     state: Mutex<State>,
+    /// 承認待ちから外した操作の決着。値が `None` の間は実行中。
+    /// タスクが受け取るまで残す（保存はしない。デーモンが止まればエージェントも止まるため）。
+    /// ロックの順序は `state` → `resolutions`。
+    resolutions: Mutex<HashMap<ApprovalId, (TaskId, Option<Resolution>)>>,
     store: Option<Arc<dyn StateStore>>,
 }
 
@@ -515,6 +542,19 @@ impl Broker {
     pub async fn approve(&self, id: ApprovalId) -> Result<Completed, BrokerError> {
         // 実行する前に承認待ちから外して保存する。途中で落ちても、同じ操作を2回実行しない（多くて1回）
         let pending = self.take_pending(id)?;
+        let outcome = self.execute_approved(pending).await;
+        self.resolve(
+            id,
+            match &outcome {
+                Ok(done) => Resolution::Done(done.clone()),
+                Err(BrokerError::Denied(reason)) => Resolution::Denied(reason.clone()),
+                Err(e) => Resolution::Failed(e.to_string()),
+            },
+        );
+        outcome
+    }
+
+    async fn execute_approved(&self, pending: PendingCall) -> Result<Completed, BrokerError> {
         let PendingCall {
             task,
             action,
@@ -602,6 +642,7 @@ impl Broker {
     /// 人間が却下した操作を破棄する。操作は実行されない。
     pub fn reject(&self, id: ApprovalId) -> Result<(), BrokerError> {
         let pending = self.take_pending(id)?;
+        self.resolve(id, Resolution::Rejected);
         let labels = self.labels(pending.task)?;
         self.record(
             pending.task,
@@ -616,9 +657,43 @@ impl Broker {
         )
     }
 
+    /// タスクの承認待ちの操作が決着したかを確かめる。決着していれば結果を返し、記録から消す。
+    ///
+    /// 承認待ちのエージェントが、人間の判断を待って続きを進めるために使う。
+    /// 他のタスクの承認待ちの ID は、存在しないものとして扱う。
+    pub fn poll_approval(
+        &self,
+        task: TaskId,
+        id: ApprovalId,
+    ) -> Result<ApprovalState, BrokerError> {
+        let state = self.state();
+        if state.pending.get(&id).is_some_and(|p| p.task == task) {
+            return Ok(ApprovalState::Waiting);
+        }
+        let mut resolutions = self.resolutions();
+        match resolutions.get(&id) {
+            Some((owner, None)) if *owner == task => Ok(ApprovalState::Waiting),
+            Some((owner, Some(_))) if *owner == task => {
+                let (_, resolution) = resolutions.remove(&id).expect("直前に確かめた");
+                Ok(ApprovalState::Resolved(resolution.expect("直前に確かめた")))
+            }
+            _ => Err(BrokerError::UnknownApproval(id)),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // 内部処理
     // -----------------------------------------------------------------------
+
+    fn resolutions(&self) -> MutexGuard<'_, HashMap<ApprovalId, (TaskId, Option<Resolution>)>> {
+        self.resolutions.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn resolve(&self, id: ApprovalId, resolution: Resolution) {
+        if let Some(entry) = self.resolutions().get_mut(&id) {
+            entry.1 = Some(resolution);
+        }
+    }
 
     fn judge(
         &self,
@@ -827,6 +902,8 @@ impl Broker {
             .remove(&id)
             .ok_or(BrokerError::UnknownApproval(id))?;
         self.persist(&state)?;
+        // `state` のロックを持ったまま「実行中」として記録する（待っているタスクが見失わないように）
+        self.resolutions().insert(id, (pending.task, None));
         Ok(pending)
     }
 

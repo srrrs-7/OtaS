@@ -44,6 +44,8 @@ AI エージェントにすべての作業を依頼する、Linux ベースの O
 5. エージェントが書いたファイルは作業領域にたまり、正本にはまだ反映されない。人間が `otas diff` で確認し、`otas commit` か `otas discard` で決める。コミットしたファイルにはタスクのラベルが付く。
 6. 正本は版として残り、`otas versions` / `otas rollback` で戻せる。
 
+`otas` を引数なしで（または `otas chat` で）起動すると対話モードになります。入力した依頼は標準のエージェント（`otas-agent`）のタスクとして実行され、経過がその場で表示されます。処理は自動で進み、人間に確かめるのは、ブローカーが承認待ちにした操作と、変更のコミットだけです。承認するとエージェントはその結果を受け取って続きを進めます。モデルは `--model` か環境変数 `OTAS_MODEL`、権限は `--read` / `--write` / `--tool` で指定します（`--read` も `--write` もなければ `/data` に書けます）。
+
 設定の例は [config/otasd.example.toml](config/otasd.example.toml)、依頼から承認までの通しの流れは `crates/otasd/tests/e2e.rs` を参照してください。
 
 ## Docker イメージで動かす
@@ -53,6 +55,7 @@ AI エージェントにすべての作業を依頼する、Linux ベースの O
 ```sh
 make up                                     # 手元でイメージをビルドして otasd を起動
 make up IMAGE=ghcr.io/srrrs-7/otas:0.1.3    # 公開されたイメージで起動
+make chat MODEL=claude                      # 対話モード（自然言語で依頼する。設定に [[models]] が必要）
 make otas ARGS=tasks                        # CLI（submit・diff・commit なども同じ）
 make logs / make status / make down
 make test / make test-privileged / make lint

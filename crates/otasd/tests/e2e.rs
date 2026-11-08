@@ -1003,3 +1003,121 @@ fn the_agent_loop_runs_tools_and_stops_when_the_model_call_needs_approval() {
         );
     });
 }
+
+/// 本文だけを返す応答（SSE）。
+fn text_stream(id: &str, text: &str) -> String {
+    let events = [
+        json!({"type": "message_start", "message": {"id": format!("msg_{id}")}}),
+        json!({"type": "content_block_start", "index": 0,
+               "content_block": {"type": "text", "text": ""}}),
+        json!({"type": "content_block_delta", "index": 0,
+               "delta": {"type": "text_delta", "text": text}}),
+        json!({"type": "content_block_stop", "index": 0}),
+        json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+        json!({"type": "message_stop"}),
+    ];
+    events
+        .iter()
+        .map(|e| format!("event: {}\ndata: {}\n\n", e["type"].as_str().unwrap(), e))
+        .collect()
+}
+
+/// 対話モード：依頼を入力すると自動で進み、承認が必要な送信だけを人間に確かめる。
+/// 承認するとエージェントは止まらずに続き、最後に変更のコミットを確かめる。
+#[test]
+fn the_interactive_console_asks_only_for_approvals_and_commits() {
+    run_local(async {
+        let (claude_url, requests) = scripted_claude(vec![
+            tool_use_stream("sig-1", "toolu_1", "demo__read_private", json!({})),
+            tool_use_stream(
+                "sig-2",
+                "toolu_2",
+                "fs__write",
+                json!({"path": "projects/a/summary.md", "content": "要約"}),
+            ),
+            tool_use_stream(
+                "sig-3",
+                "toolu_3",
+                "demo__fetch_untrusted",
+                json!({"url": "https://example.com"}),
+            ),
+            // 4 回目は私的データと信頼できない入力に触れた後なので、承認されてから届く
+            text_stream("4", "projects/a/summary.md に要約を書きました"),
+        ])
+        .await;
+
+        let state_dir = std::env::temp_dir().join(format!("otasd-chat-{}", TaskId::new()));
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let key_file = state_dir.join("anthropic.key");
+        std::fs::write(&key_file, "sk-ant-chat-test").unwrap();
+        let config = Config::from_toml(&format!(
+            "state_dir = {state:?}\nlauncher = {launcher:?}\n[demo]\ntools = true\n\
+             [[models]]\nid = \"claude\"\nprovider = \"anthropic\"\nbase_url = \"{claude_url}\"\n\
+             api_key_file = {key:?}\n",
+            state = state_dir.display().to_string(),
+            launcher = launcher().display().to_string(),
+            key = key_file.display().to_string(),
+        ))
+        .unwrap();
+        let (daemon, _console) = start_daemon(&config).await;
+
+        // 依頼 → 承認（y）→ コミット（c）→ 終了
+        let mut child = Command::new(env!("CARGO_BIN_EXE_otas"))
+            .arg("--socket")
+            .arg(config.console_socket())
+            .args([
+                "chat",
+                "--model",
+                "claude",
+                "--agent",
+                env!("CARGO_BIN_EXE_otas-agent"),
+                "--write",
+                "/data/projects/a",
+                "--tool",
+                "demo.*",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write;
+            let mut stdin = child.stdin.take().unwrap();
+            stdin
+                .write_all("私的データを要約して保存して\ny\nc\n/exit\n".as_bytes())
+                .unwrap();
+        }
+        // CLI が終わるのを待つ間も、同じスレッドのデーモンを動かし続ける
+        let output = tokio::time::timeout(
+            Duration::from_secs(60),
+            tokio::task::spawn_blocking(move || child.wait_with_output()),
+        )
+        .await
+        .expect("対話モードが終わらない")
+        .unwrap()
+        .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+
+        assert!(
+            stdout.contains("承認が必要です: モデル claude への送信"),
+            "{stdout}"
+        );
+        assert!(stdout.contains("承認しました"), "{stdout}");
+        assert!(stdout.contains("▸ fs__write"), "{stdout}");
+        assert!(
+            stdout.contains("projects/a/summary.md に要約を書きました"),
+            "{stdout}"
+        );
+        assert!(stdout.contains("コミットしました"), "{stdout}");
+        // 承認したのは 1 回だけで、エージェントは止まらずに最後まで進んだ
+        assert_eq!(stdout.matches("承認しますか").count(), 1, "{stdout}");
+        assert_eq!(requests.lock().unwrap().len(), 4);
+        assert_eq!(
+            std::fs::read_to_string(daemon.data_dir().join("projects/a/summary.md")).unwrap(),
+            "要約"
+        );
+    });
+}

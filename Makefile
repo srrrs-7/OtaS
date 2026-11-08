@@ -3,6 +3,7 @@
 #   make up                 手元でイメージをビルドして otasd を起動する
 #   make up IMAGE=ghcr.io/srrrs-7/otas:0.1.3   公開されたイメージで起動する
 #   make otas ARGS=tasks    CLI を使う
+#   make chat MODEL=claude  対話モード（自然言語で依頼する）
 #   make help               ほかのターゲットの一覧
 
 IMAGE      ?= otas:local
@@ -10,6 +11,8 @@ NAME       ?= otasd
 VOLUME     ?= otas-state
 MEMORY     ?= 2g
 PIDS       ?= 256
+# 対話モードで使うモデルの ID（設定の [[models]] の id）
+MODEL      ?= claude
 # 設定を差し替えるときは CONFIG=./otasd.toml（読み取り専用でマウントする）
 CONFIG     ?=
 # モデルの API キーを渡す環境変数の名前（値はこのシェルの環境から渡し、Makefile やイメージには書かない）
@@ -20,7 +23,7 @@ COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compos
 DEV_LABEL := org.otas.dev=true
 
 .DEFAULT_GOAL := help
-.PHONY: help image up down restart logs status otas shell test test-privileged lint fmt clean
+.PHONY: help image up down restart logs status otas chat shell test test-privileged lint fmt clean
 
 help: ## ターゲットの一覧
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -59,6 +62,9 @@ status: ## otasd の状態とタスクの一覧
 
 otas: ## CLI を使う（例: make otas ARGS="diff <タスクの ID>"）
 	docker exec -i $(NAME) otas $(ARGS)
+
+chat: ## 対話モード（例: make chat MODEL=claude ARGS="--write /data/projects/x"）
+	docker exec -it $(NAME) otas chat --model $(MODEL) $(ARGS)
 
 shell: ## otasd のコンテナでシェルを開く（一般ユーザー）
 	docker exec -it $(NAME) sh

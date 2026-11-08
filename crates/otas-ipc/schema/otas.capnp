@@ -70,6 +70,11 @@ interface TaskSession {
 
   # このタスクが使えるモデルの一覧（ModelCaps の配列の JSON）。
   models @8 () -> (modelsJson :Text);
+
+  # 承認待ちになった操作が決着するまで待ち、結果を受け取る（1回だけ）。
+  # done は元の操作と同じ形（ツールは出力の内容、推論は InferResponse の JSON、読み書きは null）。
+  # 却下や承認後の拒否は denied で返す。
+  waitApproval @9 (id :Text) -> (result :CallResult);
 }
 
 # 承認の窓口。人間向けの画面にだけ渡す。
@@ -102,4 +107,8 @@ interface Console {
   versions @6 () -> (versionsJson :Text);
   # 正本を指定した版に戻す。結果（JSON）は新しい版。
   rollback @7 (version :UInt64) -> (resultJson :Text);
+
+  # タスクの標準出力を offset バイト目から読む。next は次に読む位置。
+  # 行の途中では切らない（完全な行だけを返す）。
+  output @8 (taskId :Text, offset :UInt64) -> (text :Text, next :UInt64);
 }

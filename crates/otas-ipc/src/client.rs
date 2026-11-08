@@ -156,6 +156,16 @@ impl ConsoleClient {
         )?)?)
     }
 
+    /// タスクの標準出力を `offset` バイト目から読む。読んだ文字列と、次に読む位置を返す。
+    pub async fn output(&self, task: TaskId, offset: u64) -> Result<(String, u64), IpcError> {
+        let mut req = self.cap.output_request();
+        req.get().set_task_id(task.0.to_string());
+        req.get().set_offset(offset);
+        let response = req.send().promise.await?;
+        let r = response.get()?;
+        Ok((text(r.get_text()?)?, r.get_next()))
+    }
+
     /// 承認の窓口。
     pub fn approver(&self) -> ApproverClient {
         // パイプライン化：応答を待たずに、返ってくるはずの窓口を使い始められる
@@ -241,6 +251,18 @@ impl TaskClient {
             Remote::Pending(id) => Remote::Pending(id),
             Remote::Denied(r) => Remote::Denied(r),
         })
+    }
+
+    /// 承認待ちになった操作が決着するまで待ち、結果を受け取る。
+    /// 結果は元の操作と同じ形の JSON（推論は `InferResponse`）。却下されたときは `Denied`。
+    pub async fn wait_approval(
+        &self,
+        id: ApprovalId,
+    ) -> Result<Remote<serde_json::Value>, IpcError> {
+        let mut req = self.cap.wait_approval_request();
+        req.get().set_id(id.0.to_string());
+        let response = req.send().promise.await?;
+        read_result(response.get()?.get_result()?)
     }
 
     /// このタスクが呼べるツールの一覧。

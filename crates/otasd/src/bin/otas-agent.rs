@@ -1,6 +1,6 @@
 //! OtaS の標準のエージェント。
 //!
-//! 使い方：`otas-agent --model <モデルの ID> [--max-steps N] [--max-tokens N] <依頼>`
+//! 使い方：`otas-agent --model <モデルの ID> [--max-steps N] [--max-tokens N] [--wait-approvals] <依頼>`
 //! （`otasd` がサンドボックスの中で起動する）
 //!
 //! モデルにツールを選ばせて実行し、結果をモデルに返すことを、モデルが終わるまで繰り返す。
@@ -11,6 +11,8 @@
 //! - モデルの呼び出しもブローカーを通る。私的データと信頼できない入力の両方に触れた後は、
 //!   クラウドのモデルへの送信が承認待ちになり、エージェントはそこで止まる
 //! - 承認待ちになったツールの呼び出しは、まだ実行されていないことをモデルに伝える
+//! - `--wait-approvals` を付けると、承認待ちで止まらずに人間の判断を待ち、承認されたら結果を受け取って続ける
+//!   （人間が画面の前にいるとき、たとえば `otas` の対話モードで使う）
 //! - 経過は1行1件の JSON で標準出力に書く（監査とテストのため）
 
 use std::process::ExitCode;
@@ -35,6 +37,7 @@ struct Options {
     model: String,
     max_steps: usize,
     max_tokens: u32,
+    wait_approvals: bool,
     goal: String,
 }
 
@@ -42,6 +45,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut model = None;
     let mut max_steps = 20;
     let mut max_tokens = 16000;
+    let mut wait_approvals = false;
     let mut rest = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -64,6 +68,10 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                     .ok_or("--max-tokens には数を指定してください")?;
                 i += 2;
             }
+            "--wait-approvals" => {
+                wait_approvals = true;
+                i += 1;
+            }
             other => {
                 rest.push(other.to_string());
                 i += 1;
@@ -78,6 +86,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         model,
         max_steps,
         max_tokens,
+        wait_approvals,
         goal: rest.join(" "),
     })
 }
@@ -89,7 +98,9 @@ fn main() -> ExitCode {
         Ok(o) => o,
         Err(e) => {
             eprintln!("otas-agent: {e}");
-            eprintln!("使い方: otas-agent --model <ID> [--max-steps N] [--max-tokens N] <依頼>");
+            eprintln!(
+                "使い方: otas-agent --model <ID> [--max-steps N] [--max-tokens N] [--wait-approvals] <依頼>"
+            );
             return ExitCode::from(2);
         }
     };
@@ -119,6 +130,7 @@ mod agent {
     use otas_ports::{
         InferRequest, Message, Role, StopReason, ToolCall, ToolDef, ToolResult, ToolSpec,
     };
+    use otas_types::ApprovalId;
     use serde_json::{Value, json};
     use std::path::{Component, Path, PathBuf};
 
@@ -216,8 +228,42 @@ mod agent {
         }
     }
 
-    async fn run_remote(client: &TaskClient, tool: &ToolSpec, call: &ToolCall) -> ToolResult {
-        let (content, is_error, result) = match client.call_tool(&tool.name, &call.input).await {
+    /// 承認待ちを知らせ、人間の判断が出るまで待つ。
+    async fn wait_for(client: &TaskClient, id: ApprovalId) -> Result<Remote<Value>, String> {
+        emit(json!({"kind": "approval", "approval": id.0, "result": "waiting"}));
+        let outcome = client
+            .wait_approval(id)
+            .await
+            .map_err(|e| format!("承認の結果を受け取れません: {e}"));
+        let result = match &outcome {
+            Ok(Remote::Done(_)) => "approved",
+            Ok(_) => "rejected",
+            Err(_) => "error",
+        };
+        emit(json!({"kind": "approval", "approval": id.0, "result": result}));
+        outcome
+    }
+
+    async fn run_remote(
+        client: &TaskClient,
+        tool: &ToolSpec,
+        call: &ToolCall,
+        wait: bool,
+    ) -> ToolResult {
+        let mut outcome = client.call_tool(&tool.name, &call.input).await;
+        if wait && let Ok(Remote::Pending(id)) = outcome {
+            outcome = match wait_for(client, id).await {
+                Ok(r) => Ok(r),
+                Err(e) => {
+                    return ToolResult {
+                        call_id: call.id.clone(),
+                        content: e,
+                        is_error: true,
+                    };
+                }
+            };
+        }
+        let (content, is_error, result) = match outcome {
             Ok(Remote::Done(v)) => (v.to_string(), false, "done"),
             Ok(Remote::Pending(id)) => (
                 format!(
@@ -286,7 +332,20 @@ mod agent {
                 max_tokens: options.max_tokens,
                 tools: tools.clone(),
             };
-            let response = match client.infer_full(&options.model, &request).await {
+            let mut outcome = client.infer_full(&options.model, &request).await;
+            if options.wait_approvals
+                && let Ok(Remote::Pending(id)) = outcome
+            {
+                outcome = match wait_for(&client, id).await {
+                    Ok(Remote::Done(v)) => serde_json::from_value(v)
+                        .map(Remote::Done)
+                        .map_err(otas_ipc::IpcError::from),
+                    Ok(Remote::Denied(reason)) => Ok(Remote::Denied(reason)),
+                    Ok(Remote::Pending(next)) => Ok(Remote::Pending(next)),
+                    Err(e) => return fail(e),
+                };
+            }
+            let response = match outcome {
                 Ok(Remote::Done(r)) => r,
                 Ok(Remote::Pending(id)) => {
                     emit(
@@ -346,7 +405,7 @@ mod agent {
                     }
                 } else if let Some(tool) = remote.iter().find(|t| model_name(&t.name) == call.name)
                 {
-                    run_remote(&client, tool, call).await
+                    run_remote(&client, tool, call, options.wait_approvals).await
                 } else {
                     emit(json!({"kind": "tool", "name": call.name, "result": "unknown"}));
                     ToolResult {
