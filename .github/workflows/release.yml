@@ -85,13 +85,13 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # trivy-action はインストール用のスクリプトでの取得が失敗することがあるので、公式のイメージを digest で固定して使う
       - name: 脆弱性のスキャン
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0（過去にタグの改ざんがあったので commit で固定）
-        with:
-          image-ref: otas:scan
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: "1"
+        env:
+          TRIVY_IMAGE: aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "${TRIVY_IMAGE}" \
+            image --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 --no-progress otas:scan
 
       - id: push
         name: ビルドして push（amd64・arm64）
