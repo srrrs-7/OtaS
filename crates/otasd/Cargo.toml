@@ -15,6 +15,10 @@ name = "otas"
 path = "src/bin/otas.rs"
 
 [[bin]]
+name = "otas-agent"
+path = "src/bin/otas-agent.rs"
+
+[[bin]]
 name = "otas-demo-agent"
 path = "src/bin/otas-demo-agent.rs"
 

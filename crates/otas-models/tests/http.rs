@@ -2,7 +2,7 @@
 //! 実際の API は呼ばない（API キーもお金も使わない）。
 
 use otas_models::{ModelConfig, build};
-use otas_ports::{InferRequest, Message, ModelError, ModelProvider, Role};
+use otas_ports::{InferRequest, ModelError, ModelProvider, Role};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -91,16 +91,11 @@ fn secrets(name: &str) -> Option<String> {
 fn request() -> InferRequest {
     InferRequest {
         messages: vec![
-            Message {
-                role: Role::System,
-                content: "簡潔に答える".into(),
-            },
-            Message {
-                role: Role::User,
-                content: "こんにちは".into(),
-            },
+            otas_ports::Message::text(Role::System, "簡潔に答える"),
+            otas_ports::Message::text(Role::User, "こんにちは"),
         ],
         max_tokens: 16000,
+        ..Default::default()
     }
 }
 

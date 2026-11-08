@@ -4,7 +4,7 @@ use otas_ipc::{
     IpcError, Remote, Sessions, TaskClient, connect_approver, connect_task, serve_approver,
     serve_task, verify_peer_uid,
 };
-use otas_ports::{InferRequest, Message, Role};
+use otas_ports::{InferRequest, Role};
 use otas_testkit::{World, all_grants};
 use otas_types::{Grant, GrantSet, Label, LabelSet, TaskId};
 use serde_json::json;
@@ -110,11 +110,9 @@ fn inference_over_ipc_respects_where_the_model_runs() {
         client.call_tool("web.fetch", &json!({})).await.unwrap();
 
         let request = InferRequest {
-            messages: vec![Message {
-                role: Role::User,
-                content: "要約して".into(),
-            }],
+            messages: vec![otas_ports::Message::text(Role::User, "要約して")],
             max_tokens: 128,
+            ..Default::default()
         };
         let local = client.infer("local-small", &request).await.unwrap();
         assert!(matches!(local, Remote::Done(text) if text.contains("local-small")));

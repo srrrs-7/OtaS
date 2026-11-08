@@ -84,7 +84,7 @@ pub trait AuditSink: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// ツールの仕様。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolSpec {
     /// ツール名（例：`mail.read`）。
     pub name: String,
@@ -94,6 +94,8 @@ pub struct ToolSpec {
     pub effect: Effect,
     /// 出力に必ず付くラベル（例：Web の取得なら「信頼できない」）。
     pub output_labels: LabelSet,
+    /// 引数の JSON Schema（モデルに見せる）。
+    pub input_schema: serde_json::Value,
 }
 
 /// ツールの出力。
@@ -130,7 +132,7 @@ pub trait ToolProvider: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// モデルの能力。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelCaps {
     /// モデルの ID。
     pub id: String,
@@ -154,40 +156,123 @@ impl ModelCaps {
 }
 
 /// メッセージの役割。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     /// システムの指示。
     System,
     /// ユーザー（またはエージェントの指示役）。
+    #[default]
     User,
     /// モデルの応答。
     Assistant,
 }
 
+/// モデルに見せるツールの定義。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolDef {
+    /// 名前（英数字・`_`・`-` だけ。プロバイダの制約）。
+    pub name: String,
+    /// 説明。
+    pub description: String,
+    /// 引数の JSON Schema。
+    pub input_schema: serde_json::Value,
+}
+
+/// モデルが求めたツールの呼び出し。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCall {
+    /// 呼び出しの ID（結果を返すときに使う）。
+    pub id: String,
+    /// ツール名。
+    pub name: String,
+    /// 引数。
+    pub input: serde_json::Value,
+}
+
+/// ツールの呼び出しの結果（モデルに返す）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolResult {
+    /// 対応する呼び出しの ID。
+    pub call_id: String,
+    /// 結果の本文。
+    pub content: String,
+    /// 失敗したか。
+    #[serde(default)]
+    pub is_error: bool,
+}
+
 /// 推論に渡すメッセージ。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     /// 役割。
     pub role: Role,
     /// 本文。
     pub content: String,
+    /// モデル（assistant）が求めたツールの呼び出し。
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCall>,
+    /// ツールの呼び出しの結果（user）。
+    #[serde(default)]
+    pub tool_results: Vec<ToolResult>,
+    /// プロバイダが返した応答をそのまま保持したもの（assistant）。
+    /// 思考のブロックなど、次の要求で変えずに送り返す必要がある内容を含む。
+    #[serde(default)]
+    pub provider_raw: Option<serde_json::Value>,
+}
+
+impl Message {
+    /// 文字列だけのメッセージを作る。
+    pub fn text(role: Role, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            ..Self::default()
+        }
+    }
 }
 
 /// 推論の要求。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct InferRequest {
     /// これまでの会話。
     pub messages: Vec<Message>,
     /// 応答の最大トークン数。
     pub max_tokens: u32,
+    /// モデルが呼べるツール。
+    #[serde(default)]
+    pub tools: Vec<ToolDef>,
 }
 
-/// 推論の応答。ストリーミングは次の段階で追加する。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 応答が終わった理由。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    /// 応答を終えた。
+    #[default]
+    EndTurn,
+    /// ツールの呼び出しを求めている。
+    ToolUse,
+    /// 最大トークン数に達した（途中で切れている）。
+    MaxTokens,
+    /// その他。
+    Other,
+}
+
+/// 推論の応答。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct InferResponse {
     /// 応答の本文。
     pub content: String,
+    /// ツールの呼び出し。
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCall>,
+    /// 終わった理由。
+    #[serde(default)]
+    pub stop_reason: StopReason,
+    /// プロバイダが返した応答をそのまま保持したもの（次の要求の assistant に入れて送り返す）。
+    #[serde(default)]
+    pub provider_raw: Option<serde_json::Value>,
 }
 
 /// モデルのエラー。

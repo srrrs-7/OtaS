@@ -103,14 +103,12 @@ impl task_session::Server for TaskSessionImpl {
                 let role = m
                     .get_role()
                     .map_err(|e| failed(format!("未知の役割です: {e:?}")))?;
-                messages.push(Message {
-                    role: role_from_wire(role),
-                    content: text(m.get_content()?)?,
-                });
+                messages.push(Message::text(role_from_wire(role), text(m.get_content()?)?));
             }
             let request = InferRequest {
                 messages,
                 max_tokens: p.get_max_tokens(),
+                ..Default::default()
             };
             (text(p.get_model()?)?, request)
         };
@@ -143,6 +141,46 @@ impl task_session::Server for TaskSessionImpl {
         let labels = self.broker().labels(self.task).map_err(failed)?;
         let n = labels.iter().count() as u32;
         write_labels(results.get().init_labels(n), &labels);
+        Ok(())
+    }
+
+    async fn infer_full(
+        self: Rc<Self>,
+        params: task_session::InferFullParams,
+        mut results: task_session::InferFullResults,
+    ) -> Result<(), capnp::Error> {
+        let (model, request) = {
+            let p = params.get()?;
+            (text(p.get_model()?)?, text(p.get_request_json()?)?)
+        };
+        let request: InferRequest = serde_json::from_str(&request).map_err(failed)?;
+        let outcome = self.broker().infer(self.task, &model, request).await;
+        write_result(results.get().init_result(), outcome, |r| {
+            serde_json::to_string(&r)
+        })
+    }
+
+    async fn tools(
+        self: Rc<Self>,
+        _params: task_session::ToolsParams,
+        mut results: task_session::ToolsResults,
+    ) -> Result<(), capnp::Error> {
+        let tools = self.broker().tools_for(self.task).map_err(failed)?;
+        results
+            .get()
+            .set_tools_json(serde_json::to_string(&tools).map_err(failed)?);
+        Ok(())
+    }
+
+    async fn models(
+        self: Rc<Self>,
+        _params: task_session::ModelsParams,
+        mut results: task_session::ModelsResults,
+    ) -> Result<(), capnp::Error> {
+        let models = self.broker().models_for(self.task).map_err(failed)?;
+        results
+            .get()
+            .set_models_json(serde_json::to_string(&models).map_err(failed)?);
         Ok(())
     }
 

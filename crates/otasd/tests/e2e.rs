@@ -819,3 +819,187 @@ fn namespace_mode_shows_only_data_and_commits_through_overlay() {
         }
     });
 }
+
+/// 決まった応答（SSE）を順に返す偽の Claude API。受け取った要求の本文（JSON）を記録する。
+async fn scripted_claude(
+    responses: Vec<String>,
+) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    tokio::spawn(async move {
+        for body in responses {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = Vec::new();
+            let mut chunk = vec![0u8; 65536];
+            loop {
+                let n = socket.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&buf).to_string();
+                if let Some(pos) = text.find("\r\n\r\n") {
+                    let want = text[..pos]
+                        .lines()
+                        .find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            k.eq_ignore_ascii_case("content-length")
+                                .then(|| v.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    if buf.len() >= pos + 4 + want {
+                        let request: Value =
+                            serde_json::from_slice(&buf[pos + 4..pos + 4 + want]).unwrap();
+                        log.lock().unwrap().push(request);
+                        break;
+                    }
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    (format!("http://{addr}"), seen)
+}
+
+/// ツールを1つ呼ぶ応答（SSE）。思考のブロック（署名つき）を先頭に付ける。
+fn tool_use_stream(signature: &str, id: &str, name: &str, input: Value) -> String {
+    let events = [
+        json!({"type": "message_start", "message": {"id": format!("msg_{id}")}}),
+        json!({"type": "content_block_start", "index": 0,
+               "content_block": {"type": "thinking", "thinking": "", "signature": ""}}),
+        json!({"type": "content_block_delta", "index": 0,
+               "delta": {"type": "signature_delta", "signature": signature}}),
+        json!({"type": "content_block_stop", "index": 0}),
+        json!({"type": "content_block_start", "index": 1,
+               "content_block": {"type": "tool_use", "id": id, "name": name, "input": {}}}),
+        json!({"type": "content_block_delta", "index": 1,
+               "delta": {"type": "input_json_delta", "partial_json": input.to_string()}}),
+        json!({"type": "content_block_stop", "index": 1}),
+        json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}}),
+        json!({"type": "message_stop"}),
+    ];
+    events
+        .iter()
+        .map(|e| format!("event: {}\ndata: {}\n\n", e["type"].as_str().unwrap(), e))
+        .collect()
+}
+
+/// エージェントのループ：モデルがツールを選び、ブローカーとサンドボックスを通って実行される。
+/// 私的データと信頼できない入力の両方に触れた後は、クラウドのモデルへの送信が承認待ちになって止まる。
+#[test]
+fn the_agent_loop_runs_tools_and_stops_when_the_model_call_needs_approval() {
+    run_local(async {
+        let (claude_url, requests) = scripted_claude(vec![
+            tool_use_stream("sig-1", "toolu_1", "demo__read_private", json!({})),
+            tool_use_stream(
+                "sig-2",
+                "toolu_2",
+                "fs__write",
+                json!({"path": "projects/a/summary.md", "content": "要約"}),
+            ),
+            tool_use_stream(
+                "sig-3",
+                "toolu_3",
+                "demo__fetch_untrusted",
+                json!({"url": "https://example.com"}),
+            ),
+        ])
+        .await;
+
+        let state_dir = std::env::temp_dir().join(format!("otasd-agent-{}", TaskId::new()));
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let key_file = state_dir.join("anthropic.key");
+        std::fs::write(&key_file, "sk-ant-agent-test").unwrap();
+        let config = Config::from_toml(&format!(
+            "state_dir = {state:?}\nlauncher = {launcher:?}\n[demo]\ntools = true\n\
+             [[models]]\nid = \"claude\"\nprovider = \"anthropic\"\nbase_url = \"{claude_url}\"\n\
+             api_key_file = {key:?}\n",
+            state = state_dir.display().to_string(),
+            launcher = launcher().display().to_string(),
+            key = key_file.display().to_string(),
+        ))
+        .unwrap();
+        let (daemon, console) = start_daemon(&config).await;
+
+        let request = json!({
+            "program": env!("CARGO_BIN_EXE_otas-agent"),
+            "args": ["--model", "claude", "私的データを要約して projects/a/summary.md に保存し、関連する Web ページも確認して"],
+            "grants": [
+                {"kind": "write", "prefix": "/data/projects/a"},
+                {"kind": "tool", "pattern": "demo.*"},
+                {"kind": "model", "pattern": "claude"}
+            ]
+        });
+        let task = console.submit(&request.to_string()).await.unwrap();
+        let status = wait_for_exit(&console, task).await;
+        let log_dir = daemon.supervisor().log_dir(task);
+        let stderr = std::fs::read_to_string(log_dir.join("stderr.log")).unwrap();
+        // モデルへの送信が承認待ちで止まり（終了コード 3）、作業領域の変更はレビュー待ち
+        assert_eq!(status["state"], "awaiting_review", "{status} {stderr}");
+        assert_eq!(status["code"], 3, "{stderr}");
+
+        let lines = read_lines(&log_dir.join("stdout.log"));
+        let tools: Vec<(&str, &str)> = lines
+            .iter()
+            .filter(|l| l["kind"] == "tool")
+            .map(|l| (l["name"].as_str().unwrap(), l["result"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            tools,
+            vec![
+                ("demo.read_private", "done"),
+                ("fs__write", "done"),
+                ("demo.fetch_untrusted", "done"),
+            ],
+            "{lines:#?}"
+        );
+        assert_eq!(lines.last().unwrap()["result"], "pending", "{lines:#?}");
+
+        // クラウドに届いたのは 3 回だけ（4 回目は保留中）
+        let requests = requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 3);
+        let first = &requests[0];
+        assert_eq!(first["stream"], true);
+        let tool_names: Vec<&str> = first["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            tool_names.contains(&"fs__write") && tool_names.contains(&"demo__send"),
+            "{tool_names:?}"
+        );
+        // 2 回目：前の応答（思考のブロックの署名を含む）をそのまま送り返し、ツールの結果を付ける
+        let second = &requests[1]["messages"];
+        assert_eq!(second[1]["role"], "assistant");
+        assert_eq!(second[1]["content"][0]["type"], "thinking");
+        assert_eq!(second[1]["content"][0]["signature"], "sig-1");
+        assert_eq!(second[2]["content"][0]["type"], "tool_result");
+        assert_eq!(second[2]["content"][0]["tool_use_id"], "toolu_1");
+
+        // 承認待ちの一覧には、クラウドのモデルへの送信がある
+        let pending = console.approver().pending().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].action,
+            otas_types::Action::Infer {
+                model: "claude".into()
+            }
+        );
+        // エージェントが書いたファイルは、レビューを待っている
+        assert_eq!(
+            console.review(task).await.unwrap(),
+            json!([{"path": "/data/projects/a/summary.md", "kind": "added"}])
+        );
+    });
+}

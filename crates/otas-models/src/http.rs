@@ -10,7 +10,9 @@ pub(crate) const MAX_RETRIES: u32 = 2;
 
 pub(crate) fn client(id: &str, timeout: Duration) -> Result<reqwest::Client, ModelConfigError> {
     reqwest::Client::builder()
-        .timeout(timeout)
+        // ストリーミングでは応答全体が長くなりうるので、全体ではなく「データが途切れている時間」で区切る
+        .connect_timeout(Duration::from_secs(30))
+        .read_timeout(timeout)
         // API キーのヘッダを別のホストに送らないよう、リダイレクトはたどらない
         .redirect(reqwest::redirect::Policy::none())
         .build()

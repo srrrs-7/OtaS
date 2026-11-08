@@ -4,7 +4,7 @@ use crate::IpcError;
 use crate::convert::{label_to_wire, read_labels, role_to_wire, text};
 use crate::otas_capnp::{approver, call_result, console, task_session};
 use capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty};
-use otas_ports::InferRequest;
+use otas_ports::{InferRequest, InferResponse, ModelCaps, ToolSpec};
 use otas_types::{Action, ApprovalId, GrantSet, LabelSet, TaskId};
 use tokio::net::UnixStream;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -224,6 +224,39 @@ impl TaskClient {
             Remote::Pending(id) => Remote::Pending(id),
             Remote::Denied(r) => Remote::Denied(r),
         })
+    }
+
+    /// モデルで推論する（ツールの呼び出しを含む）。
+    pub async fn infer_full(
+        &self,
+        model: &str,
+        request: &InferRequest,
+    ) -> Result<Remote<InferResponse>, IpcError> {
+        let mut req = self.cap.infer_full_request();
+        req.get().set_model(model);
+        req.get().set_request_json(serde_json::to_string(request)?);
+        let response = req.send().promise.await?;
+        Ok(match read_result(response.get()?.get_result()?)? {
+            Remote::Done(v) => Remote::Done(serde_json::from_value(v)?),
+            Remote::Pending(id) => Remote::Pending(id),
+            Remote::Denied(r) => Remote::Denied(r),
+        })
+    }
+
+    /// このタスクが呼べるツールの一覧。
+    pub async fn tools(&self) -> Result<Vec<ToolSpec>, IpcError> {
+        let response = self.cap.tools_request().send().promise.await?;
+        Ok(serde_json::from_str(&text(
+            response.get()?.get_tools_json()?,
+        )?)?)
+    }
+
+    /// このタスクが使えるモデルの一覧。
+    pub async fn models(&self) -> Result<Vec<ModelCaps>, IpcError> {
+        let response = self.cap.models_request().send().promise.await?;
+        Ok(serde_json::from_str(&text(
+            response.get()?.get_models_json()?,
+        )?)?)
     }
 
     /// データの読み取りを判定する。

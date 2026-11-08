@@ -32,6 +32,7 @@ impl FakeTool {
                 description: format!("テスト用のツール {name}"),
                 effect,
                 output_labels,
+                input_schema: json!({"type": "object"}),
             },
             calls: AtomicUsize::new(0),
         })
@@ -93,6 +94,7 @@ impl ModelProvider for FakeModel {
                 self.id,
                 request.messages.len()
             ),
+            ..InferResponse::default()
         })
     }
 }

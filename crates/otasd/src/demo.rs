@@ -27,13 +27,20 @@ impl ToolProvider for DemoTool {
     }
 }
 
-fn tool(name: &str, description: &str, effect: Effect, labels: LabelSet) -> Arc<dyn ToolProvider> {
+fn tool(
+    name: &str,
+    description: &str,
+    effect: Effect,
+    labels: LabelSet,
+    input_schema: serde_json::Value,
+) -> Arc<dyn ToolProvider> {
     Arc::new(DemoTool {
         spec: ToolSpec {
             name: name.into(),
             description: description.into(),
             effect,
             output_labels: labels,
+            input_schema,
         },
     })
 }
@@ -46,18 +53,21 @@ pub fn tools() -> Vec<Arc<dyn ToolProvider>> {
             "私的データを読んだことにする（内部で完結）",
             Effect::Internal,
             LabelSet::of([Label::Private]),
+            json!({"type": "object", "properties": {}}),
         ),
         tool(
             "demo.fetch_untrusted",
             "Web から取得したことにする（要求は外部に出て、結果は信頼できない）",
             Effect::External,
             LabelSet::of([Label::Untrusted]),
+            json!({"type": "object", "properties": {"url": {"type": "string"}}}),
         ),
         tool(
             "demo.send",
             "外部に送信したことにする",
             Effect::External,
             LabelSet::empty(),
+            json!({"type": "object", "properties": {"to": {"type": "string"}, "body": {"type": "string"}}}),
         ),
     ]
 }

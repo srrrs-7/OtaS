@@ -10,8 +10,9 @@
 //! 5. 結果を監査ログに記録する
 
 use otas_ports::{
-    AuditError, AuditSink, InferRequest, InferResponse, ModelError, ModelProvider, PolicyContext,
-    PolicyEngine, StateError, StateStore, ToolError, ToolOutput, ToolProvider,
+    AuditError, AuditSink, InferRequest, InferResponse, ModelCaps, ModelError, ModelProvider,
+    PolicyContext, PolicyEngine, StateError, StateStore, ToolError, ToolOutput, ToolProvider,
+    ToolSpec,
 };
 use otas_types::{
     AccessRequest, Action, ApprovalId, AttenuationError, AuditEntry, Decision, Effect, GrantSet,
@@ -326,6 +327,48 @@ impl Broker {
         otas_ifc::propagate(&mut parent_entry.labels, &child_labels);
         self.persist(&state)?;
         Ok(())
+    }
+
+    /// タスクが呼べるツールの一覧（権限のあるものだけ。名前順）。エージェントがモデルに見せるために使う。
+    pub fn tools_for(&self, task: TaskId) -> Result<Vec<ToolSpec>, BrokerError> {
+        let grants = self.grants_of(task)?;
+        let mut specs: Vec<ToolSpec> = self
+            .tools
+            .values()
+            .map(|t| t.spec())
+            .filter(|s| {
+                grants.permits(&Action::CallTool {
+                    tool: s.name.clone(),
+                })
+            })
+            .collect();
+        specs.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(specs)
+    }
+
+    /// タスクが使えるモデルの一覧（権限のあるものだけ。ID 順）。
+    pub fn models_for(&self, task: TaskId) -> Result<Vec<ModelCaps>, BrokerError> {
+        let grants = self.grants_of(task)?;
+        let mut caps: Vec<ModelCaps> = self
+            .models
+            .values()
+            .map(|m| m.caps())
+            .filter(|c| {
+                grants.permits(&Action::Infer {
+                    model: c.id.clone(),
+                })
+            })
+            .collect();
+        caps.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(caps)
+    }
+
+    fn grants_of(&self, task: TaskId) -> Result<GrantSet, BrokerError> {
+        self.state()
+            .tasks
+            .get(&task)
+            .map(|t| t.grants.clone())
+            .ok_or(BrokerError::UnknownTask(task))
     }
 
     /// タスクが積み上げたラベルを返す。

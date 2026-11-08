@@ -61,6 +61,15 @@ interface TaskSession {
 
   # 子タスクの結果を受け取るときに、子のラベルを取り込む。
   absorb @5 (child :TaskSession) -> ();
+
+  # モデルで推論する（ツールの呼び出しを含む）。requestJson は InferRequest、done は InferResponse の JSON。
+  inferFull @6 (model :Text, requestJson :Text) -> (result :CallResult);
+
+  # このタスクが呼べるツールの一覧（ToolSpec の配列の JSON）。
+  tools @7 () -> (toolsJson :Text);
+
+  # このタスクが使えるモデルの一覧（ModelCaps の配列の JSON）。
+  models @8 () -> (modelsJson :Text);
 }
 
 # 承認の窓口。人間向けの画面にだけ渡す。

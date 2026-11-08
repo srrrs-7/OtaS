@@ -5,8 +5,8 @@ use otas_audit::{MemoryAuditLog, verify_chain};
 use otas_broker::{Broker, BrokerError, CallResult, Completed};
 use otas_policy::DefaultPolicy;
 use otas_ports::{
-    InferRequest, InferResponse, Message, ModelCaps, ModelError, ModelProvider, Role, ToolError,
-    ToolOutput, ToolProvider, ToolSpec,
+    InferRequest, InferResponse, ModelCaps, ModelError, ModelProvider, Role, ToolError, ToolOutput,
+    ToolProvider, ToolSpec,
 };
 use otas_types::{Effect, Grant, GrantSet, Guarantees, Label, LabelSet, Outcome};
 use serde_json::json;
@@ -30,6 +30,7 @@ impl FakeTool {
                 description: format!("テスト用のツール {name}"),
                 effect,
                 output_labels,
+                input_schema: json!({"type": "object"}),
             },
             calls: AtomicUsize::new(0),
         })
@@ -78,6 +79,7 @@ impl ModelProvider for FakeModel {
                 self.id,
                 request.messages.len()
             ),
+            ..InferResponse::default()
         })
     }
 }
@@ -155,11 +157,9 @@ fn all_tools() -> GrantSet {
 
 fn hello() -> InferRequest {
     InferRequest {
-        messages: vec![Message {
-            role: Role::User,
-            content: "こんにちは".into(),
-        }],
+        messages: vec![otas_ports::Message::text(Role::User, "こんにちは")],
         max_tokens: 64,
+        ..Default::default()
     }
 }
 

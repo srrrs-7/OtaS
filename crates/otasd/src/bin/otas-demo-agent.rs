@@ -115,11 +115,9 @@ async fn run(steps: Vec<Step>) -> ExitCode {
                 max_tokens,
             } => {
                 let request = otas_ports::InferRequest {
-                    messages: vec![otas_ports::Message {
-                        role: otas_ports::Role::User,
-                        content: prompt,
-                    }],
+                    messages: vec![otas_ports::Message::text(otas_ports::Role::User, prompt)],
                     max_tokens: max_tokens.unwrap_or(1024),
+                    ..Default::default()
                 };
                 match client.infer(&infer, &request).await {
                     Ok(Remote::Done(text)) => {
