@@ -48,6 +48,18 @@ AI エージェントにすべての作業を依頼する、Linux ベースの O
 
 ## Docker イメージで動かす
 
+`make` で起動できます（`make help` でターゲットの一覧）。
+
+```sh
+make up                                     # 手元でイメージをビルドして otasd を起動
+make up IMAGE=ghcr.io/srrrs-7/otas:0.1.0    # 公開されたイメージで起動
+make otas ARGS=tasks                        # CLI（submit・diff・commit なども同じ）
+make logs / make status / make down
+make test / make test-privileged / make lint
+```
+
+手で起動する場合は次のとおりです。
+
 `otasd` を Docker のサービスとして動かせます。サンドボックスは `landlock`（特権不要）で、ホストのカーネルは 6.7 以降が必要です（Landlock ABI v4。満たさなければ起動を拒否します）。
 
 ```sh
