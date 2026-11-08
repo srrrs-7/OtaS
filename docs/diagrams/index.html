@@ -1,0 +1,784 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>OtaS 設計図</title>
+<style>
+/* Layout: 技術図面のような1カラム。本文は約68字幅、図は本文より広い枠に置き、狭い画面では枠の中だけ横スクロール */
+:root {
+  --bg: #F3F5F4;
+  --surface: #FFFFFF;
+  --ink: #16212B;
+  --ink-2: #3D4A56;
+  --muted: #5E6A75;
+  --line: #D3D9DD;
+  --line-strong: #8C98A3;
+  --accent: #2B45B5;
+  --accent-soft: #E4E8FA;
+  --ok: #2B7348;
+  --ok-soft: #E1F1E6;
+  --warn: #B04A1E;
+  --warn-soft: #FAE8DF;
+  --sans: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+  --mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, "Noto Sans Mono CJK JP", monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0E1215;
+    --surface: #161C21;
+    --ink: #E3E8EC;
+    --ink-2: #B9C3CB;
+    --muted: #8D99A3;
+    --line: #2A333A;
+    --line-strong: #5A6772;
+    --accent: #8FA3FF;
+    --accent-soft: #1B2347;
+    --ok: #6FCB93;
+    --ok-soft: #142B1D;
+    --warn: #F09A6E;
+    --warn-soft: #36200F;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0E1215;
+  --surface: #161C21;
+  --ink: #E3E8EC;
+  --ink-2: #B9C3CB;
+  --muted: #8D99A3;
+  --line: #2A333A;
+  --line-strong: #5A6772;
+  --accent: #8FA3FF;
+  --accent-soft: #1B2347;
+  --ok: #6FCB93;
+  --ok-soft: #142B1D;
+  --warn: #F09A6E;
+  --warn-soft: #36200F;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.8;
+}
+.wrap {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding-block: 40px 72px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+a { color: var(--accent); text-underline-offset: 3px; }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+code { font-family: var(--mono); font-size: 0.92em; }
+
+/* 表題 */
+header { display: grid; gap: 20px; }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  margin: 0;
+}
+h1 {
+  margin: 0;
+  font-size: 30px;
+  line-height: 1.3;
+  letter-spacing: 0.02em;
+  text-wrap: balance;
+}
+.lead { margin: 0; max-width: 68ch; color: var(--ink-2); }
+
+/* 図面の表題欄 */
+.titleblock {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+}
+.titleblock div { padding: 8px 14px 10px; border-left: 1px solid var(--line); min-width: 0; }
+.titleblock div:first-child { border-left: 0; }
+.titleblock dt {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+}
+.titleblock dd { margin: 0; font-size: 14px; font-variant-numeric: tabular-nums; }
+@media (max-width: 640px) {
+  .titleblock { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .titleblock div:nth-child(3) { border-left: 0; }
+  .titleblock div:nth-child(n+3) { border-top: 1px solid var(--line); }
+}
+
+/* 凡例と目次 */
+.key {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 24px;
+  margin-top: 28px;
+}
+@media (max-width: 760px) { .key { grid-template-columns: minmax(0, 1fr); } }
+.key h2 {
+  font-size: 12px;
+  font-family: var(--mono);
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+.legend { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13.5px; color: var(--ink-2); }
+.legend li { display: flex; align-items: center; gap: 10px; }
+.sw { flex: none; width: 28px; height: 16px; border-radius: 3px; border: 1.5px solid var(--line-strong); background: var(--surface); }
+.sw.new { background: var(--accent-soft); border-color: var(--accent); }
+.sw.ok { background: var(--ok-soft); border-color: var(--ok); }
+.sw.warn { background: var(--warn-soft); border-color: var(--warn); }
+.sw.zone { background: transparent; border-style: dashed; }
+.sw.cond { border: 0; background: transparent; height: 2px; border-top: 2px dashed var(--ink-2); border-radius: 0; }
+.toc { margin: 0; padding-left: 0; list-style: none; display: grid; gap: 4px; font-size: 14px; }
+.toc li { display: flex; gap: 12px; align-items: baseline; }
+.toc .n { font-family: var(--mono); font-size: 12px; color: var(--muted); width: 3.2em; flex: none; }
+
+/* 本文 */
+section { margin-top: 64px; scroll-margin-top: 16px; }
+section > h2 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 14px;
+  margin: 0 0 8px;
+  font-size: 21px;
+  line-height: 1.4;
+  text-wrap: balance;
+}
+.fignum {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+}
+section p { margin: 0 0 10px; max-width: 68ch; }
+.verdict {
+  margin: 14px 0 0;
+  padding: 12px 16px;
+  max-width: 68ch;
+  border-left: 3px solid var(--accent);
+  background: var(--surface);
+}
+.verdict strong { color: var(--accent); }
+
+figure {
+  margin: 20px 0 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.fig { overflow-x: auto; padding: 18px 14px 10px; }
+.fig svg { display: block; width: 100%; min-width: 720px; height: auto; }
+figcaption {
+  border-top: 1px solid var(--line);
+  padding: 12px 18px 14px;
+  font-size: 13.5px;
+  line-height: 1.75;
+  color: var(--ink-2);
+}
+
+/* 図の中の要素（テーマに追従させるため、色はすべてトークン経由） */
+.dg text { fill: var(--ink); font-family: var(--sans); font-size: 13px; }
+.dg .t { font-size: 13.5px; font-weight: 600; }
+.dg .s { fill: var(--muted); font-size: 11.5px; }
+.dg .el { fill: var(--ink-2); font-size: 11.5px; }
+.dg .m { font-family: var(--mono); font-size: 12.5px; }
+.dg .hd { font-size: 14px; font-weight: 700; }
+.dg .box { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1.2; }
+.dg .box.new { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.6; }
+.dg .box.ok { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 1.4; }
+.dg .box.warn { fill: var(--warn-soft); stroke: var(--warn); stroke-width: 1.4; }
+.dg .box.ghost { fill: var(--bg); stroke: var(--line-strong); stroke-dasharray: 4 4; }
+.dg .zone { fill: none; stroke: var(--line-strong); stroke-width: 1.2; stroke-dasharray: 6 5; }
+.dg .e { fill: none; stroke: var(--ink-2); stroke-width: 1.4; }
+.dg .e.acc { stroke: var(--accent); stroke-width: 1.7; }
+.dg .e.ok { stroke: var(--ok); stroke-width: 1.6; }
+.dg .e.warn { stroke: var(--warn); stroke-width: 1.6; }
+.dg .e.dash { stroke-dasharray: 5 4; }
+.dg .ah { fill: var(--ink-2); }
+.dg .ah.acc { fill: var(--accent); }
+.dg .ah.ok { fill: var(--ok); }
+.dg .ah.warn { fill: var(--warn); }
+.dg .dot { fill: var(--ink-2); }
+.dg .dot.acc { fill: var(--accent); }
+.dg .rule { stroke: var(--line-strong); stroke-width: 2; }
+.dg .chip-acc { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.2; }
+.dg .chip-warn { fill: var(--warn-soft); stroke: var(--warn); stroke-width: 1.2; }
+.dg .dim { fill: var(--muted); }
+.dg text.acc { fill: var(--accent); }
+.dg text.warn { fill: var(--warn); }
+
+/* ディレクトリ構成 */
+.tree {
+  margin: 20px 0 0;
+  padding: 16px 18px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--ink);
+}
+.tree .c { color: var(--muted); }
+.tree .k { color: var(--accent); }
+.tree-label {
+  margin: 22px 0 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+}
+
+footer {
+  margin-top: 72px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--muted);
+  display: grid;
+  gap: 4px;
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <p class="eyebrow">OtaS / docs / diagrams</p>
+  <h1>OtaS 設計図</h1>
+  <p class="lead">ユーザーランドを1つにし、人間はすべての作業をAIエージェントに依頼するOS「OtaS」の仕組みを図で示します。検討の詳細は <a href="../research/001-ai-os-optimization-perspectives.md">#001 AI最適化の観点</a> と <a href="../research/002-file-management.md">#002 ファイル管理</a> にあります。</p>
+  <dl class="titleblock">
+    <div><dt>対象</dt><dd>全体構成・ファイル管理</dd></div>
+    <div><dt>版</dt><dd>0.1</dd></div>
+    <div><dt>日付</dt><dd>2026-11-08</dd></div>
+    <div><dt>状態</dt><dd>ドラフト（提案）</dd></div>
+  </dl>
+</header>
+
+<div class="key">
+  <div>
+    <h2>凡例</h2>
+    <ul class="legend">
+      <li><span class="sw new"></span>OtaS で新しく作る部分・注目する経路</li>
+      <li><span class="sw"></span>既存の仕組み・踏襲する部分</li>
+      <li><span class="sw ok"></span>確定する（コミット）</li>
+      <li><span class="sw warn"></span>保留・衝突・要注意</li>
+      <li><span class="sw zone"></span>破線の枠：隔離の境界</li>
+      <li><span class="sw cond"></span>破線の矢印：条件付き・あとから起きる経路</li>
+    </ul>
+  </div>
+  <div>
+    <h2>図の一覧</h2>
+    <ol class="toc">
+      <li><span class="n">図1</span><a href="#overview">全体の構成</a></li>
+      <li><span class="n">図2</span><a href="#lifecycle">タスクの一生</a></li>
+      <li><span class="n">図3</span><a href="#labels">ラベルによる情報フロー制御</a></li>
+      <li><span class="n">図4</span><a href="#fs-layers">ファイル管理：踏襲するものと作り直すもの</a></li>
+      <li><span class="n">図5</span><a href="#namespace">タスクから見えるファイル</a></li>
+      <li><span class="n">図6</span><a href="#commit">書き込みと確定</a></li>
+      <li><span class="n">付録</span><a href="#layout">ディレクトリ構成案</a></li>
+    </ol>
+  </div>
+</div>
+
+<!-- 図1 -->
+<section id="overview">
+  <h2><span class="fignum">図1</span>全体の構成</h2>
+  <p>処理の単位はエージェントのタスクです。タスクはそれぞれ別のサンドボックスで動き、外の世界に作用する手段はブローカーを通る呼び出ししかありません。</p>
+  <figure>
+    <div class="fig">
+      <svg class="dg" viewBox="0 0 880 600" role="img" aria-label="人間は画面からエージェントに依頼する。エージェントはタスクごとのサンドボックスで動き、外部への作用はすべてブローカーを通る。ブローカーは呼び出しを判定して監査ログに記録し、高リスクの操作だけ人間に承認を求める。">
+        <defs>
+          <marker id="f1-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker>
+          <marker id="f1-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah acc"/></marker>
+        </defs>
+
+        <!-- 人間と画面 -->
+        <rect class="box" x="30" y="24" width="120" height="44" rx="6"/>
+        <text class="t" x="90" y="51" text-anchor="middle">人間</text>
+        <rect class="box" x="210" y="24" width="240" height="44" rx="6"/>
+        <text class="t" x="330" y="51" text-anchor="middle">対話と承認の画面</text>
+        <line class="e" x1="150" y1="46" x2="210" y2="46" marker-end="url(#f1-a)"/>
+        <text class="el" x="180" y="38" text-anchor="middle">依頼</text>
+
+        <!-- 監督 -->
+        <line class="e" x1="330" y1="68" x2="330" y2="108" marker-end="url(#f1-a)"/>
+        <text class="el" x="338" y="92">タスクにする</text>
+        <rect class="box" x="210" y="108" width="240" height="52" rx="6"/>
+        <text class="t" x="330" y="130" text-anchor="middle">エージェント監督</text>
+        <text class="s" x="330" y="148" text-anchor="middle">タスクの生成・予算・スケジュール</text>
+
+        <!-- サンドボックス -->
+        <rect class="zone" x="190" y="196" width="630" height="120" rx="10"/>
+        <text class="s" x="808" y="214" text-anchor="end">サンドボックス（タスクごとに隔離）</text>
+        <line class="e" x1="330" y1="160" x2="330" y2="228" marker-end="url(#f1-a)"/>
+        <text class="el" x="338" y="184">起動：権限と予算を渡す</text>
+
+        <rect class="box" x="210" y="228" width="240" height="64" rx="6"/>
+        <text class="t" x="330" y="255" text-anchor="middle">タスクA</text>
+        <text class="s" x="330" y="275" text-anchor="middle">エージェント</text>
+        <rect class="box" x="590" y="228" width="200" height="64" rx="6"/>
+        <text class="t" x="690" y="255" text-anchor="middle">タスクB</text>
+        <text class="s" x="690" y="275" text-anchor="middle">サブエージェント</text>
+        <line class="e" x1="450" y1="260" x2="590" y2="260" marker-end="url(#f1-a)"/>
+        <text class="el" x="520" y="252" text-anchor="middle">委任（権限は縮小のみ）</text>
+
+        <!-- ブローカーへの呼び出し -->
+        <line class="e acc" x1="330" y1="292" x2="330" y2="352" marker-end="url(#f1-acc)"/>
+        <text class="el" x="322" y="336" text-anchor="end">ツール呼び出し</text>
+        <polyline class="e acc" points="690,292 690,334 420,334 420,352" marker-end="url(#f1-acc)"/>
+        <text class="el" x="555" y="328" text-anchor="middle">ツール呼び出し</text>
+
+        <!-- ブローカー -->
+        <rect class="box new" x="210" y="352" width="240" height="52" rx="6"/>
+        <text class="t" x="330" y="374" text-anchor="middle">ブローカー（唯一の出口）</text>
+        <text class="s" x="330" y="393" text-anchor="middle">ポリシー判定・秘密情報の差し込み</text>
+
+        <!-- 監査 -->
+        <line class="e" x1="450" y1="378" x2="560" y2="378" marker-end="url(#f1-a)"/>
+        <text class="el" x="505" y="370" text-anchor="middle">すべて記録</text>
+        <rect class="box" x="560" y="352" width="200" height="52" rx="6"/>
+        <text class="t" x="660" y="374" text-anchor="middle">監査ログ</text>
+        <text class="s" x="660" y="393" text-anchor="middle">追記専用・改ざん検知</text>
+
+        <!-- 承認の要求 -->
+        <polyline class="e acc dash" points="210,378 90,378 90,68" marker-end="url(#f1-acc)"/>
+        <text class="el acc" x="98" y="236">高リスクは</text>
+        <text class="el acc" x="98" y="252">承認を求める</text>
+
+        <!-- サービス -->
+        <line class="e" x1="330" y1="404" x2="330" y2="444" marker-end="url(#f1-a)"/>
+        <line class="e" x1="130" y1="424" x2="730" y2="424"/>
+        <line class="e" x1="130" y1="424" x2="130" y2="444" marker-end="url(#f1-a)"/>
+        <line class="e" x1="530" y1="424" x2="530" y2="444" marker-end="url(#f1-a)"/>
+        <line class="e" x1="730" y1="424" x2="730" y2="444" marker-end="url(#f1-a)"/>
+        <text class="el" x="338" y="417">許可された呼び出しだけ通す</text>
+
+        <rect class="box" x="40" y="444" width="180" height="52" rx="6"/>
+        <text class="t" x="130" y="466" text-anchor="middle">推論</text>
+        <text class="s" x="130" y="485" text-anchor="middle">モデル共有・優先度制御</text>
+        <rect class="box" x="240" y="444" width="180" height="52" rx="6"/>
+        <text class="t" x="330" y="466" text-anchor="middle">データ</text>
+        <text class="s" x="330" y="485" text-anchor="middle">意味層（図4〜6）</text>
+        <rect class="box" x="440" y="444" width="180" height="52" rx="6"/>
+        <text class="t" x="530" y="466" text-anchor="middle">ネットワーク</text>
+        <text class="s" x="530" y="485" text-anchor="middle">宛先の制限・認証の代行</text>
+        <rect class="box" x="640" y="444" width="180" height="52" rx="6"/>
+        <text class="t" x="730" y="466" text-anchor="middle">ツール</text>
+        <text class="s" x="730" y="485" text-anchor="middle">MCPサーバ・コマンド</text>
+
+        <!-- カーネル -->
+        <rect class="box" x="40" y="524" width="780" height="60" rx="6"/>
+        <text class="t" x="430" y="549" text-anchor="middle">Linux カーネル</text>
+        <text class="s m" x="430" y="569" text-anchor="middle">namespaces · Landlock · seccomp · cgroups · BPF LSM · Btrfs · accel</text>
+      </svg>
+    </div>
+    <figcaption>人間は画面からエージェントに依頼するだけです。監督がタスクを作り、権限と予算を渡してサンドボックスで起動します。タスクがサブエージェントに委任するとき、権限は縮小する方向にしか渡せません。ファイル、ネットワーク、推論、ツールへのアクセスはすべてブローカーを通ります。ブローカーは呼び出しごとにポリシーで判定し、監査ログに記録します。人間に承認を求めるのは高リスクの操作だけです。</figcaption>
+  </figure>
+</section>
+
+<!-- 図2 -->
+<section id="lifecycle">
+  <h2><span class="fignum">図2</span>タスクの一生</h2>
+  <p>タスクは「計画 → 実行 → レビュー → コミット」の順に進みます。危険度に応じて承認をはさみます。どの段階でも捨てられ、確定した後でも取り消せます。</p>
+  <figure>
+    <div class="fig">
+      <svg class="dg" viewBox="0 0 880 330" role="img" aria-label="タスクの状態遷移。依頼で計画に入り、低リスクならそのまま実行、高リスクなら承認待ちを経て実行する。実行中は中断と再開ができる。完了後はレビューに進み、承認でコミット、却下で破棄、修正指示で実行に戻る。コミット後も前の版に戻せる。">
+        <defs>
+          <marker id="f2-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker>
+          <marker id="f2-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah ok"/></marker>
+        </defs>
+
+        <circle class="dot" cx="40" cy="174" r="7"/>
+        <line class="e" x1="47" y1="174" x2="140" y2="174" marker-end="url(#f2-a)"/>
+        <text class="el" x="93" y="166" text-anchor="middle">依頼</text>
+
+        <rect class="box" x="140" y="148" width="110" height="52" rx="6"/>
+        <text class="t" x="195" y="170" text-anchor="middle">計画</text>
+        <text class="s" x="195" y="189" text-anchor="middle">手順と必要な権限</text>
+
+        <!-- 承認待ちへの迂回 -->
+        <polyline class="e" points="195,148 195,62 240,62" marker-end="url(#f2-a)"/>
+        <text class="el" x="187" y="110" text-anchor="end">高リスク</text>
+        <rect class="box" x="240" y="36" width="110" height="52" rx="6"/>
+        <text class="t" x="295" y="58" text-anchor="middle">承認待ち</text>
+        <text class="s" x="295" y="77" text-anchor="middle">人間が確認</text>
+        <polyline class="e" points="350,62 395,62 395,148" marker-end="url(#f2-a)"/>
+        <text class="el" x="403" y="110">承認</text>
+
+        <line class="e" x1="250" y1="174" x2="340" y2="174" marker-end="url(#f2-a)"/>
+        <text class="el" x="295" y="166" text-anchor="middle">低リスク</text>
+
+        <rect class="box new" x="340" y="148" width="110" height="52" rx="6"/>
+        <text class="t" x="395" y="170" text-anchor="middle">実行中</text>
+        <text class="s" x="395" y="189" text-anchor="middle">サンドボックス内</text>
+
+        <!-- 中断と再開 -->
+        <line class="e" x1="375" y1="200" x2="375" y2="262" marker-end="url(#f2-a)"/>
+        <text class="el" x="367" y="236" text-anchor="end">待機・停止</text>
+        <line class="e" x1="415" y1="262" x2="415" y2="200" marker-end="url(#f2-a)"/>
+        <text class="el" x="423" y="236">再開</text>
+        <rect class="box" x="340" y="262" width="110" height="52" rx="6"/>
+        <text class="t" x="395" y="284" text-anchor="middle">中断</text>
+        <text class="s" x="395" y="303" text-anchor="middle">状態を保存</text>
+
+        <line class="e" x1="450" y1="174" x2="540" y2="174" marker-end="url(#f2-a)"/>
+        <text class="el" x="495" y="166" text-anchor="middle">完了</text>
+
+        <rect class="box" x="540" y="148" width="110" height="52" rx="6"/>
+        <text class="t" x="595" y="170" text-anchor="middle">レビュー</text>
+        <text class="s" x="595" y="189" text-anchor="middle">差分を提示</text>
+
+        <!-- やり直し -->
+        <polyline class="e" points="595,148 595,118 430,118 430,148" marker-end="url(#f2-a)"/>
+        <text class="el" x="512" y="110" text-anchor="middle">修正を指示</text>
+
+        <!-- 破棄 -->
+        <line class="e" x1="595" y1="200" x2="595" y2="262" marker-end="url(#f2-a)"/>
+        <text class="el" x="603" y="236">却下</text>
+        <rect class="box" x="540" y="262" width="110" height="52" rx="6"/>
+        <text class="t" x="595" y="284" text-anchor="middle">破棄</text>
+        <text class="s" x="595" y="303" text-anchor="middle">変更を捨てる</text>
+
+        <line class="e ok" x1="650" y1="174" x2="740" y2="174" marker-end="url(#f2-ok)"/>
+        <text class="el" x="695" y="166" text-anchor="middle">承認</text>
+        <rect class="box ok" x="740" y="148" width="110" height="52" rx="6"/>
+        <text class="t" x="795" y="170" text-anchor="middle">コミット</text>
+        <text class="s" x="795" y="189" text-anchor="middle">新しい版を作る</text>
+
+        <!-- 取り消し -->
+        <line class="e dash" x1="795" y1="200" x2="795" y2="262" marker-end="url(#f2-a)"/>
+        <text class="el" x="787" y="236" text-anchor="end">あとから</text>
+        <rect class="box" x="740" y="262" width="110" height="52" rx="6"/>
+        <text class="t" x="795" y="284" text-anchor="middle">取り消し</text>
+        <text class="s" x="795" y="303" text-anchor="middle">前の版に戻す</text>
+      </svg>
+    </div>
+    <figcaption>計画の段階で、必要な権限と操作の危険度が決まります。低リスクのタスクはそのまま実行され、高リスクのタスクは人間の承認を待ちます。実行中に何をしても、確定するまでは作業領域の中の変更にすぎないので、却下すれば跡は残りません。中断したタスクは状態を保存しておき、再起動をまたいで再開できます。</figcaption>
+  </figure>
+</section>
+
+<!-- 図3 -->
+<section id="labels">
+  <h2><span class="fignum">図3</span>ラベルによる情報フロー制御</h2>
+  <p>プロンプトインジェクションをモデルだけで確実に防ぐことはできません。そこで、データの出所をラベルで追跡し、危険な組み合わせをOSが止めます。</p>
+  <figure>
+    <div class="fig">
+      <svg class="dg" viewBox="0 0 880 344" role="img" aria-label="タスクはWebページとメールとプロジェクトのファイルを読み、私的と信頼できないのラベルを蓄積する。そのタスクがメールを送ろうとすると、ブローカーは3条件がそろったと判定し、アウトボックスに保留して人間の承認を待つ。タスクが書いたファイルにも同じラベルが付く。">
+        <defs>
+          <marker id="f3-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker>
+          <marker id="f3-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah acc"/></marker>
+          <marker id="f3-warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah warn"/></marker>
+        </defs>
+
+        <!-- 入力 -->
+        <rect class="box" x="20" y="40" width="200" height="52" rx="6"/>
+        <text class="t" x="120" y="62" text-anchor="middle">Webページを読む</text>
+        <text class="s warn" x="120" y="81" text-anchor="middle">ラベル：信頼できない</text>
+        <rect class="box" x="20" y="140" width="200" height="52" rx="6"/>
+        <text class="t" x="120" y="162" text-anchor="middle">メールを読む</text>
+        <text class="s acc" x="120" y="181" text-anchor="middle">ラベル：私的</text>
+        <rect class="box" x="20" y="240" width="200" height="52" rx="6"/>
+        <text class="t" x="120" y="262" text-anchor="middle">プロジェクトのファイル</text>
+        <text class="s" x="120" y="281" text-anchor="middle">ラベル：なし</text>
+
+        <line class="e" x1="220" y1="66" x2="320" y2="128" marker-end="url(#f3-a)"/>
+        <line class="e" x1="220" y1="166" x2="320" y2="166" marker-end="url(#f3-a)"/>
+        <line class="e" x1="220" y1="266" x2="320" y2="206" marker-end="url(#f3-a)"/>
+        <text class="el" x="270" y="158" text-anchor="middle">読む</text>
+
+        <!-- タスク -->
+        <rect class="box" x="320" y="110" width="200" height="112" rx="6"/>
+        <text class="t" x="420" y="138" text-anchor="middle">タスクA</text>
+        <text class="s" x="420" y="158" text-anchor="middle">読んだもののラベルが積み上がる</text>
+        <rect class="chip-acc" x="346" y="174" width="60" height="24" rx="12"/>
+        <text class="el" x="376" y="190" text-anchor="middle">私的</text>
+        <rect class="chip-warn" x="414" y="174" width="86" height="24" rx="12"/>
+        <text class="el" x="457" y="190" text-anchor="middle">信頼できない</text>
+
+        <!-- ファイルへの書き込み -->
+        <line class="e" x1="520" y1="128" x2="600" y2="70" marker-end="url(#f3-a)"/>
+        <text class="el" x="552" y="92" text-anchor="end">書く</text>
+        <rect class="box" x="600" y="40" width="260" height="52" rx="6"/>
+        <text class="t" x="730" y="62" text-anchor="middle">report.md を書く</text>
+        <text class="s" x="730" y="81" text-anchor="middle">同じラベルが付く（私的・信頼できない）</text>
+
+        <!-- 外部送信の判定 -->
+        <line class="e acc" x1="520" y1="188" x2="600" y2="188" marker-end="url(#f3-acc)"/>
+        <text class="el" x="560" y="180" text-anchor="middle">送信を要求</text>
+        <rect class="box new" x="600" y="140" width="260" height="96" rx="6"/>
+        <text class="t" x="730" y="164" text-anchor="middle">ブローカーの判定</text>
+        <text class="s" x="730" y="184" text-anchor="middle">私的 ＋ 信頼できない ＋ 外部送信</text>
+        <text class="s" x="730" y="202" text-anchor="middle">＝ 3つの条件がそろう</text>
+        <text class="s" x="730" y="220" text-anchor="middle">→ 自動では通さない</text>
+
+        <line class="e warn" x1="730" y1="236" x2="730" y2="276" marker-end="url(#f3-warn)"/>
+        <text class="el" x="738" y="260">保留</text>
+        <rect class="box warn" x="600" y="276" width="260" height="52" rx="6"/>
+        <text class="t" x="730" y="298" text-anchor="middle">アウトボックスで保留</text>
+        <text class="s" x="730" y="317" text-anchor="middle">人間が承認したら送信する</text>
+      </svg>
+    </div>
+    <figcaption>タスクには、読んだデータのラベルが積み上がります。私的データと信頼できない入力の両方に触れたタスクが外部に送信しようとすると、ブローカーは自動では通さず、アウトボックスに保留して人間の承認を待ちます。これは Meta の「Agents Rule of Two」をOSが強制する形です。タスクが書いたファイルにも同じラベルが付くので、いったんファイルに書いてから別のタスクで送る、という抜け道も防げます。</figcaption>
+  </figure>
+</section>
+
+<!-- 図4 -->
+<section id="fs-layers">
+  <h2><span class="fignum">図4</span>ファイル管理：踏襲するものと作り直すもの</h2>
+  <p>人間はすべての作業をエージェントに依頼するので、フォルダを人が整理する前提は不要になります。一方で、ファイルとパスはエージェントと既存ツールが最も扱い慣れた形式です。そこで、層ごとに判断を分けました。</p>
+  <figure>
+    <div class="fig">
+      <svg class="dg" viewBox="0 0 880 404" role="img" aria-label="既存のOSとOtaSのファイル管理を5つの層で比べた図。保存層とPOSIXのファイルAPIは踏襲し、権限は置き換え、意味層は新設し、人間がフォルダで整理する操作はエージェントへの依頼に置き換える。">
+        <defs>
+          <marker id="f4-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker>
+          <marker id="f4-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah acc"/></marker>
+        </defs>
+
+        <text class="hd" x="170" y="26" text-anchor="middle">既存のOS</text>
+        <text class="s" x="425" y="26" text-anchor="middle">判断</text>
+        <text class="hd" x="695" y="26" text-anchor="middle">OtaS</text>
+
+        <!-- 行1：人間との接点 -->
+        <rect class="box" x="20" y="44" width="300" height="56" rx="6"/>
+        <text class="t" x="170" y="68" text-anchor="middle">人間がフォルダで整理</text>
+        <text class="s" x="170" y="87" text-anchor="middle">置き場所と名前を人が決める</text>
+        <line class="e acc" x1="320" y1="72" x2="530" y2="72" marker-end="url(#f4-acc)"/>
+        <text class="el acc" x="425" y="64" text-anchor="middle">置き換え</text>
+        <rect class="box new" x="530" y="44" width="330" height="56" rx="6"/>
+        <text class="t" x="695" y="68" text-anchor="middle">人間はエージェントに頼む</text>
+        <text class="s" x="695" y="87" text-anchor="middle">問い合わせで作るビューと変更のレビュー</text>
+
+        <!-- 行2：意味層 -->
+        <rect class="box ghost" x="20" y="116" width="300" height="56" rx="6"/>
+        <text class="t dim" x="170" y="140" text-anchor="middle">意味の層はない</text>
+        <text class="s" x="170" y="159" text-anchor="middle">検索の索引はOSやアプリごとに別々</text>
+        <line class="e acc" x1="320" y1="144" x2="530" y2="144" marker-end="url(#f4-acc)"/>
+        <text class="el acc" x="425" y="136" text-anchor="middle">新設</text>
+        <rect class="box new" x="530" y="116" width="330" height="56" rx="6"/>
+        <text class="t" x="695" y="140" text-anchor="middle">意味層</text>
+        <text class="s" x="695" y="159" text-anchor="middle">安定ID・出所ラベル・索引・履歴</text>
+
+        <!-- 行3：権限 -->
+        <rect class="box" x="20" y="188" width="300" height="56" rx="6"/>
+        <text class="t" x="170" y="212" text-anchor="middle">ユーザー単位の権限</text>
+        <text class="s" x="170" y="231" text-anchor="middle">rwx・ACL。一度許可すれば有効のまま</text>
+        <line class="e acc" x1="320" y1="216" x2="530" y2="216" marker-end="url(#f4-acc)"/>
+        <text class="el acc" x="425" y="208" text-anchor="middle">置き換え</text>
+        <rect class="box new" x="530" y="188" width="330" height="56" rx="6"/>
+        <text class="t" x="695" y="212" text-anchor="middle">タスク単位の視界と権限</text>
+        <text class="s" x="695" y="231" text-anchor="middle">名前空間・Landlock・ラベル（図5）</text>
+
+        <!-- 行4：API -->
+        <rect class="box" x="20" y="260" width="300" height="56" rx="6"/>
+        <text class="t" x="170" y="284" text-anchor="middle">POSIX API と階層パス</text>
+        <text class="s m" x="170" y="303" text-anchor="middle">open · read · write · /home/…</text>
+        <line class="e" x1="320" y1="288" x2="530" y2="288" marker-end="url(#f4-a)"/>
+        <text class="el" x="425" y="280" text-anchor="middle">踏襲</text>
+        <rect class="box" x="530" y="260" width="330" height="56" rx="6"/>
+        <text class="t" x="695" y="284" text-anchor="middle">POSIX API と階層パス</text>
+        <text class="s" x="695" y="303" text-anchor="middle">既存ツールもLLMもそのまま使える</text>
+
+        <!-- 行5：保存層 -->
+        <rect class="box" x="20" y="332" width="300" height="56" rx="6"/>
+        <text class="t" x="170" y="356" text-anchor="middle">保存層（ext4・APFS・NTFS）</text>
+        <text class="s" x="170" y="375" text-anchor="middle">書き込むと即座に上書き</text>
+        <line class="e" x1="320" y1="360" x2="530" y2="360" marker-end="url(#f4-a)"/>
+        <text class="el" x="425" y="352" text-anchor="middle">踏襲して強化</text>
+        <rect class="box" x="530" y="332" width="330" height="56" rx="6"/>
+        <text class="t" x="695" y="356" text-anchor="middle">Btrfs ＋ タスクごとの上書き層</text>
+        <text class="s" x="695" y="375" text-anchor="middle">スナップショットを取り、比べてから確定（図6）</text>
+      </svg>
+    </div>
+    <figcaption>下の2層（保存層とファイルAPI）は踏襲し、上の3層を作り直します。人間がフォルダを整理する操作はなくなります。その代わりにOSが管理するのは、エージェントのタスクに何が見えるか、書いた変更をどう確定するか、データにどんな出所と意味があるか、の3つです。データの正本はあくまでファイルで、意味層の索引はいつでもファイルから作り直せる派生物にします。</figcaption>
+  </figure>
+  <p class="verdict"><strong>結論：</strong>ファイルという形式とパスという住所は踏襲します。誰に何が見えるか、変更がどう確定するか、データにどんな意味と出所があるかを作り直します。</p>
+</section>
+
+<!-- 図5 -->
+<section id="namespace">
+  <h2><span class="fignum">図5</span>タスクから見えるファイル</h2>
+  <p>タスクには、許可された部分だけを組み立てたファイルツリーを見せます。パスは「住所」から「そのタスクの視界」に変わり、見え方そのものが権限になります。</p>
+  <figure>
+    <div class="fig">
+      <svg class="dg" viewBox="0 0 880 312" role="img" aria-label="OS全体のファイルのうち、許可されたものだけがタスクAのツリーに現れる。projects/a は上書き層付きで /work に、mail は読み取り専用で /in/mail に、store は読み取り専用で /tools に見える。projects/b、memory、audit はタスクAからは見えない。">
+        <defs>
+          <marker id="f5-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker>
+          <marker id="f5-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah acc"/></marker>
+        </defs>
+
+        <text class="hd" x="20" y="28">OS全体の実体</text>
+        <text class="hd" x="560" y="28">タスクAから見えるツリー</text>
+
+        <!-- 実体 -->
+        <rect class="box" x="20" y="50" width="310" height="28" rx="4"/>
+        <text class="m" x="36" y="69">/data/projects/a</text>
+        <rect class="box ghost" x="20" y="86" width="310" height="28" rx="4"/>
+        <text class="m dim" x="36" y="105">/data/projects/b</text>
+        <text class="s" x="318" y="104" text-anchor="end">見えない</text>
+        <rect class="box" x="20" y="122" width="310" height="28" rx="4"/>
+        <text class="m" x="36" y="141">/data/mail</text>
+        <text class="s acc" x="318" y="140" text-anchor="end">ラベル：私的</text>
+        <rect class="box ghost" x="20" y="158" width="310" height="28" rx="4"/>
+        <text class="m dim" x="36" y="177">/data/memory</text>
+        <text class="s" x="318" y="176" text-anchor="end">見えない</text>
+        <rect class="box" x="20" y="194" width="310" height="28" rx="4"/>
+        <text class="m" x="36" y="213">/store</text>
+        <rect class="box ghost" x="20" y="230" width="310" height="28" rx="4"/>
+        <text class="m dim" x="36" y="249">/audit</text>
+        <text class="s" x="318" y="248" text-anchor="end">見えない</text>
+
+        <!-- 対応づけ -->
+        <line class="e acc" x1="330" y1="64" x2="560" y2="64" marker-end="url(#f5-acc)"/>
+        <text class="el m" x="445" y="56" text-anchor="middle">overlay（upper付き）</text>
+        <line class="e" x1="330" y1="136" x2="560" y2="136" marker-end="url(#f5-a)"/>
+        <text class="el m" x="445" y="128" text-anchor="middle">bind mount, ro</text>
+        <line class="e" x1="330" y1="208" x2="560" y2="208" marker-end="url(#f5-a)"/>
+        <text class="el m" x="445" y="200" text-anchor="middle">bind mount, ro</text>
+
+        <!-- タスクの視界 -->
+        <rect class="box new" x="560" y="50" width="300" height="28" rx="4"/>
+        <text class="m" x="576" y="69">/work</text>
+        <text class="s" x="846" y="68" text-anchor="end">読み書き可（変更は upper へ）</text>
+        <rect class="box" x="560" y="122" width="300" height="28" rx="4"/>
+        <text class="m" x="576" y="141">/in/mail</text>
+        <text class="s" x="846" y="140" text-anchor="end">読み取り専用</text>
+        <rect class="box" x="560" y="194" width="300" height="28" rx="4"/>
+        <text class="m" x="576" y="213">/tools</text>
+        <text class="s" x="846" y="212" text-anchor="end">読み取り専用</text>
+        <rect class="box" x="560" y="268" width="300" height="28" rx="4"/>
+        <text class="m" x="576" y="287">/tmp</text>
+        <text class="s" x="846" y="286" text-anchor="end">タスク専用・空から始まる</text>
+      </svg>
+    </div>
+    <figcaption>考え方は Plan 9 の「プロセスごとの名前空間」と同じです。mount namespace の中で、許可された部分だけを bind mount や OverlayFS で組み立てます。許可されていないパスはタスクの中に存在しないので、エージェントは触れようがありません。さらに Landlock でアクセスの種類を絞ります。エージェントも既存ツールも、普通のファイルとして読み書きするだけです。</figcaption>
+  </figure>
+</section>
+
+<!-- 図6 -->
+<section id="commit">
+  <h2><span class="fignum">図6</span>書き込みと確定</h2>
+  <p>エージェントの書き込みは、正本にすぐには反映されません。タスク専用の上書き層にたまり、比較してから確定します。git のブランチとマージに近い動きを、ファイルシステムの層で行います。</p>
+  <figure>
+    <div class="fig">
+      <svg class="dg" viewBox="0 0 880 356" role="img" aria-label="タスク開始時に正本v12のスナップショットをbaseとして固定する。エージェントはbaseを読み、変更はupperに書く。その間にタスクBがv13をコミットする。コミット判定でbase、upper、現在の正本v13を比べ、衝突がなければ適用してv14を作り、衝突があれば解決を依頼する。">
+        <defs>
+          <marker id="f6-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker>
+          <marker id="f6-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah acc"/></marker>
+          <marker id="f6-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah ok"/></marker>
+          <marker id="f6-warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah warn"/></marker>
+        </defs>
+
+        <!-- 正本の版 -->
+        <text class="s" x="40" y="56">/data（正本）の版</text>
+        <line class="rule" x1="40" y1="70" x2="850" y2="70"/>
+        <circle class="dot" cx="200" cy="70" r="6"/>
+        <text class="m" x="200" y="56" text-anchor="middle">v12</text>
+        <circle class="dot" cx="480" cy="70" r="6"/>
+        <text class="m" x="480" y="56" text-anchor="middle">v13</text>
+        <text class="s" x="480" y="36" text-anchor="middle">タスクBが先にコミット</text>
+        <circle class="dot acc" cx="760" cy="70" r="6"/>
+        <text class="m acc" x="760" y="56" text-anchor="middle">v14</text>
+        <text class="s" x="760" y="36" text-anchor="middle">タスクAのコミット</text>
+
+        <!-- base の固定 -->
+        <line class="e" x1="200" y1="76" x2="200" y2="138" marker-end="url(#f6-a)"/>
+        <text class="el" x="208" y="96">開始時に固定</text>
+
+        <!-- タスクAの視界 -->
+        <rect class="zone" x="44" y="110" width="212" height="194" rx="8"/>
+        <text class="el" x="54" y="128">タスクAの視界</text>
+        <rect class="box" x="60" y="138" width="180" height="52" rx="6"/>
+        <text class="t" x="150" y="160" text-anchor="middle">base</text>
+        <text class="s" x="150" y="179" text-anchor="middle">v12 の読み取り専用コピー</text>
+        <text class="s" x="150" y="220" text-anchor="middle">2層を重ねて1つに見せる</text>
+        <rect class="box new" x="60" y="240" width="180" height="52" rx="6"/>
+        <text class="t" x="150" y="262" text-anchor="middle">upper（上書き層）</text>
+        <text class="s" x="150" y="281" text-anchor="middle">タスクAの変更だけ</text>
+
+        <!-- エージェント -->
+        <rect class="box" x="300" y="214" width="120" height="52" rx="6"/>
+        <text class="t" x="360" y="236" text-anchor="middle">エージェント</text>
+        <text class="s" x="360" y="255" text-anchor="middle">普通に読み書き</text>
+        <polyline class="e" points="240,164 360,164 360,214" marker-end="url(#f6-a)"/>
+        <text class="el" x="300" y="156" text-anchor="middle">読む</text>
+        <line class="e acc" x1="300" y1="256" x2="240" y2="256" marker-end="url(#f6-acc)"/>
+        <text class="el" x="270" y="250" text-anchor="middle">書く</text>
+
+        <!-- コミット判定への入力 -->
+        <polyline class="e" points="480,76 480,236 540,236" marker-end="url(#f6-a)"/>
+        <text class="el" x="488" y="150">現在の正本</text>
+        <polyline class="e acc" points="150,292 150,336 630,336 630,304" marker-end="url(#f6-acc)"/>
+        <text class="el" x="390" y="328" text-anchor="middle">差分（upper）</text>
+
+        <!-- コミット判定 -->
+        <rect class="box" x="540" y="196" width="180" height="108" rx="6"/>
+        <text class="t" x="630" y="222" text-anchor="middle">コミット判定</text>
+        <text class="s" x="630" y="244" text-anchor="middle">base・upper・現在の正本</text>
+        <text class="s" x="630" y="262" text-anchor="middle">の3つを比べる</text>
+        <text class="s" x="630" y="284" text-anchor="middle">（git の3者マージと同じ）</text>
+
+        <!-- 結果 -->
+        <polyline class="e ok" points="720,236 760,236 760,76" marker-end="url(#f6-ok)"/>
+        <text class="el" x="768" y="160">衝突なし：適用</text>
+        <line class="e warn" x1="720" y1="290" x2="760" y2="290" marker-end="url(#f6-warn)"/>
+        <rect class="box warn" x="760" y="266" width="100" height="50" rx="6"/>
+        <text class="t" x="810" y="288" text-anchor="middle">衝突あり</text>
+        <text class="s" x="810" y="306" text-anchor="middle">解決を依頼</text>
+      </svg>
+    </div>
+    <figcaption>タスクを始めるときに正本（<code>/data</code>）のスナップショットを取り、それを下層（base）、タスク専用の上書き層を上層（upper）として OverlayFS で重ねます。下層を稼働中の正本ではなく固定のスナップショットにするのは、OverlayFS ではマウント中に下層を変えたときの動作が未定義だからです。完了後は base、upper、現在の正本を比べ、衝突がなければ適用して新しい版を作ります。破棄は upper を消すだけで済み、コミット後の取り消しは前の版のスナップショットに戻すだけで済みます。</figcaption>
+  </figure>
+</section>
+
+<!-- 付録 -->
+<section id="layout">
+  <h2><span class="fignum">付録</span>ディレクトリ構成案</h2>
+  <p>メール、予定、連絡先も、オープンな形式のファイルとして <code>/data</code> に置きます。エージェントがほかのデータと同じ方法で扱え、同じラベルと権限の仕組みが効き、ユーザーがデータを持ち出せるからです。</p>
+  <p class="tree-label">OS全体</p>
+<pre class="tree"><span class="k">/</span>               <span class="c">ベースOS（読み取り専用、A/B更新）</span>
+<span class="k">/store/</span>         <span class="c">内容アドレスで管理する不変のオブジェクト（モデル・パッケージ・実行環境）</span>
+<span class="k">/data/</span>          <span class="c">ユーザーデータの正本（Btrfs サブボリューム、コミットごとにスナップショット）</span>
+  projects/
+  documents/
+  media/
+  mail/         <span class="c">Maildir</span>
+  calendar/     <span class="c">iCalendar</span>
+  contacts/     <span class="c">vCard</span>
+  memory/       <span class="c">エージェントの記憶（Markdown）</span>
+<span class="k">/tasks/&lt;id&gt;/</span>    <span class="c">タスクごとの作業領域（upper・計画・ログ）。コミットか破棄で片付ける</span>
+<span class="k">/audit/</span>         <span class="c">追記専用の監査ログ</span></pre>
+  <p class="tree-label">タスクAから見えるツリー（図5）</p>
+<pre class="tree"><span class="k">/work</span>       <span class="c">← /data/projects/a を OverlayFS で重ねたもの（読み書き可）</span>
+<span class="k">/in/mail</span>    <span class="c">← /data/mail の読み取り専用 bind mount（ラベル：私的）</span>
+<span class="k">/tools</span>      <span class="c">← /store の読み取り専用 bind mount</span>
+<span class="k">/tmp</span>        <span class="c">← タスク専用（空の状態から始まる）</span></pre>
+</section>
+
+<footer>
+  <span>詳細：<a href="../research/001-ai-os-optimization-perspectives.md">#001 AI最適化の観点</a> ／ <a href="../research/002-file-management.md">#002 ファイル管理</a></span>
+  <span>このページは外部リソースを読み込まない単体の HTML です。</span>
+</footer>
+
+</div>
+</body>
+</html>

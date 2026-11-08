@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/otas-types",
+    "crates/otas-ports",
+    "crates/otas-ifc",
+    "crates/otas-policy",
+    "crates/otas-audit",
+    "crates/otas-broker",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.85"
+
+[workspace.dependencies]
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+otas-types = { path = "crates/otas-types" }
+otas-ports = { path = "crates/otas-ports" }
+otas-ifc = { path = "crates/otas-ifc" }
+otas-policy = { path = "crates/otas-policy" }
+otas-audit = { path = "crates/otas-audit" }
+otas-broker = { path = "crates/otas-broker" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"

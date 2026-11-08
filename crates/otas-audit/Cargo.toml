@@ -1,0 +1,17 @@
+[package]
+name = "otas-audit"
+description = "OtaS の監査ログ（追記専用・ハッシュチェーン）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+otas-ports.workspace = true
+otas-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

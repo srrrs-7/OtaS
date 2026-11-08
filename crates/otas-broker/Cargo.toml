@@ -1,0 +1,23 @@
+[package]
+name = "otas-broker"
+description = "OtaS のブローカー。タスクの操作をすべて仲介し、判定・記録・ラベル伝播を行う"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+otas-ifc.workspace = true
+otas-ports.workspace = true
+otas-types.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+otas-audit.workspace = true
+otas-policy.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

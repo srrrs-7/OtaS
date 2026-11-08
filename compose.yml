@@ -1,0 +1,30 @@
+# OtaS 開発環境
+#
+# 使い方（ソースを変更したら --build で取り込み直す）:
+#   docker compose run --build --rm dev                      # テスト
+#   docker compose run --build --rm dev cargo clippy --workspace --all-targets -- -D warnings
+#   docker compose run --build --rm dev cargo fmt --all --check
+#
+# ホストのディレクトリはマウントしない。使うのはキャッシュ用の名前付きボリュームだけ。
+name: otas
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: otas-dev:local
+    volumes:
+      - cargo-cache:/cache
+    # コンテナ内でも権限は最小限にする
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 4g
+    tmpfs:
+      - /tmp
+
+volumes:
+  cargo-cache:

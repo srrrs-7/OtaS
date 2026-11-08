@@ -1,0 +1,16 @@
+[package]
+name = "otas-ports"
+description = "OtaS のポート（trait）定義。中核はここだけに依存し、実装は付け替える"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+otas-types.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

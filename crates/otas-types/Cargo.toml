@@ -1,0 +1,17 @@
+[package]
+name = "otas-types"
+description = "OtaS の共通語彙（ID・ラベル・権限・操作・判定・監査記録）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
