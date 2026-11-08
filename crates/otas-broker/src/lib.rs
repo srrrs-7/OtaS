@@ -361,6 +361,28 @@ impl Broker {
         Ok(())
     }
 
+    /// 前のタスクのラベルを引き継ぐ。会話の続きのように、前のタスクの結果を入力にするときに使う。
+    ///
+    /// 前のタスクが触れた私的データや信頼できない入力は、結果の文章を通じて次のタスクに入る。
+    /// ラベルを引き継がないと、その文章がラベルのないデータとして扱われてしまう（ラベルの洗浄）。
+    /// ラベルは増える方向にしか変わらないので、引き継いで権限が広がることはない。
+    pub fn inherit_labels(&self, task: TaskId, from: TaskId) -> Result<(), BrokerError> {
+        let mut state = self.state();
+        let labels = state
+            .tasks
+            .get(&from)
+            .ok_or(BrokerError::UnknownTask(from))?
+            .labels
+            .clone();
+        let entry = state
+            .tasks
+            .get_mut(&task)
+            .ok_or(BrokerError::UnknownTask(task))?;
+        otas_ifc::propagate(&mut entry.labels, &labels);
+        self.persist(&state)?;
+        Ok(())
+    }
+
     /// タスクが呼べるツールの一覧（権限のあるものだけ。名前順）。エージェントがモデルに見せるために使う。
     pub fn tools_for(&self, task: TaskId) -> Result<Vec<ToolSpec>, BrokerError> {
         let grants = self.grants_of(task)?;

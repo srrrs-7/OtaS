@@ -260,7 +260,9 @@ mod chat {
     const HELP: &str = "\
 依頼を日本語などで入力すると、エージェントが処理します。
 承認が必要な操作と、変更のコミットだけを確かめます。
+前のやりとりは次の依頼に引き継ぎます（触れたデータのラベルも引き継ぎます）。
 
+  /new                新しい会話を始める（前のやりとりとラベルを引き継がない）
   /tasks              タスクの一覧
   /pending            承認待ちの一覧
   /diff <タスク>      作業領域の変更
@@ -329,13 +331,76 @@ mod chat {
             })
         }
 
-        fn request(&self, goal: &str) -> Value {
+        fn request(&self, goal: &str, conversation: &Conversation) -> Value {
+            let mut args = vec![
+                "--model".to_string(),
+                self.model.clone(),
+                "--wait-approvals".into(),
+            ];
+            let history = conversation.history();
+            if !history.is_empty() {
+                args.push("--history".into());
+                args.push(Value::Array(history).to_string());
+            }
+            args.push("--".into());
+            args.push(goal.into());
             json!({
                 "program": self.agent,
-                "args": ["--model", self.model, "--wait-approvals", goal],
+                "args": args,
                 "grants": GrantSet::new(self.grants.clone()),
+                "continues": conversation.last.map(|t| t.0),
             })
         }
+    }
+
+    /// エージェントに渡す前のやりとりの上限（バイト）。引数の長さの上限（1つ 128KiB）に収める。
+    const HISTORY_BUDGET: usize = 32 * 1024;
+    /// 1回の応答として渡す長さの上限（バイト）。
+    const ANSWER_LIMIT: usize = 8 * 1024;
+
+    /// 会話。前のやりとりと、最後のタスク（ラベルを引き継ぐ元）を持つ。
+    #[derive(Debug, Default)]
+    pub(crate) struct Conversation {
+        turns: Vec<(String, String)>,
+        last: Option<TaskId>,
+    }
+
+    impl Conversation {
+        fn record(&mut self, task: TaskId, goal: &str, answer: &str) {
+            self.turns
+                .push((goal.to_string(), truncate(answer, ANSWER_LIMIT)));
+            // 次のタスクはこのタスクのラベルを引き継ぐ。このタスクも前のタスクから引き継いでいるので、
+            // 会話のラベルはすべて最後のタスクに積み上がっている
+            self.last = Some(task);
+        }
+
+        /// 上限に収まる新しい方のやりとり（古い順）。
+        fn history(&self) -> Vec<Value> {
+            let mut used = 0;
+            let mut kept = Vec::new();
+            for (goal, answer) in self.turns.iter().rev() {
+                used += goal.len() + answer.len();
+                if used > HISTORY_BUDGET {
+                    break;
+                }
+                kept.push(json!({"role": "assistant", "text": answer}));
+                kept.push(json!({"role": "user", "text": goal}));
+            }
+            kept.reverse();
+            kept
+        }
+    }
+
+    /// 文字の途中で切らないように、`max` バイト以下にする。
+    fn truncate(text: &str, max: usize) -> String {
+        if text.len() <= max {
+            return text.to_string();
+        }
+        let mut end = max;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…（以下省略）", &text[..end])
     }
 
     /// 標準入力を1行ずつ読む。
@@ -375,6 +440,7 @@ mod chat {
                 .join("、")
         );
         let mut input = Input::new();
+        let mut conversation = Conversation::default();
         loop {
             let Some(line) = input.ask("\notas> ").await? else {
                 println!();
@@ -387,6 +453,11 @@ mod chat {
                 let words: Vec<&str> = command.split_whitespace().collect();
                 match words.as_slice() {
                     ["exit"] | ["quit"] => break,
+                    ["new"] => {
+                        conversation = Conversation::default();
+                        println!("新しい会話を始めます");
+                        Ok(())
+                    }
                     ["help"] => {
                         println!("{HELP}");
                         Ok(())
@@ -398,7 +469,7 @@ mod chat {
                     },
                 }
             } else {
-                turn(console, &options, &line, &mut input).await
+                turn(console, &options, &mut conversation, &line, &mut input).await
             };
             if let Err(e) = result {
                 println!("エラー: {e}");
@@ -411,13 +482,15 @@ mod chat {
     async fn turn(
         console: &ConsoleClient,
         options: &Options,
+        conversation: &mut Conversation,
         goal: &str,
         input: &mut Input,
     ) -> Result<(), String> {
         let task = console
-            .submit(&options.request(goal).to_string())
+            .submit(&options.request(goal, conversation).to_string())
             .await
             .map_err(err)?;
+        let mut answer = None;
         // 経過はデーモンから届く（承認待ちと終了も）。こちらから問い合わせを繰り返さない
         let mut events = console.watch(task).await.map_err(err)?;
         let approver = console.approver();
@@ -426,6 +499,9 @@ mod chat {
             match events.recv().await {
                 Some(WatchEvent::Output(lines)) => {
                     for line in lines.lines() {
+                        if let Some(text) = final_text(line) {
+                            answer = Some(text);
+                        }
                         if let Some(shown) = render(line) {
                             println!("{shown}");
                         }
@@ -453,7 +529,21 @@ mod chat {
                 None => return Err("デーモンとの接続が切れました".into()),
             }
         };
+        // 応答がなくても記録する（タスクが触れたデータのラベルは引き継ぐ必要がある）
+        let answer = answer.unwrap_or_else(|| {
+            format!(
+                "（応答がないまま終わりました。状態: {}）",
+                status["state"].as_str().unwrap_or("?")
+            )
+        });
+        conversation.record(task, goal, &answer);
         finish(console, task, &status, input).await
+    }
+
+    /// エージェントの最後の応答（`final` の行）なら、その本文を返す。
+    fn final_text(line: &str) -> Option<String> {
+        let event: Value = serde_json::from_str(line).ok()?;
+        (event["kind"] == "final").then(|| event["text"].as_str().unwrap_or("").to_string())
     }
 
     /// エージェントの経過の1行（JSON）を、人間に見せる形にする。見せないものは `None`。
@@ -564,10 +654,12 @@ mod chat {
                     }
                 ]
             );
+            let request = o.request("こんにちは", &Conversation::default());
             assert_eq!(
-                o.request("こんにちは")["args"],
-                json!(["--model", "claude", "--wait-approvals", "こんにちは"])
+                request["args"],
+                json!(["--model", "claude", "--wait-approvals", "--", "こんにちは"])
             );
+            assert_eq!(request["continues"], Value::Null);
         }
 
         #[test]
@@ -602,6 +694,53 @@ mod chat {
             assert!(Options::parse_with(&[], none).is_err());
             assert!(Options::parse_with(&["--model"], none).is_err());
             assert!(Options::parse_with(&["--model", "m", "--bogus"], none).is_err());
+        }
+
+        #[test]
+        fn a_conversation_passes_recent_turns_and_the_last_task() {
+            let env = |_: &str| Some("claude".to_string());
+            let o = Options::parse_with(&[], env).unwrap();
+            let mut c = Conversation::default();
+            let first = TaskId::new();
+            let second = TaskId::new();
+            c.record(first, "一つ目", "応答1");
+            c.record(second, "二つ目", &"あ".repeat(ANSWER_LIMIT));
+
+            let request = o.request("三つ目", &c);
+            assert_eq!(request["continues"], json!(second.0));
+            let args: Vec<&str> = request["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap())
+                .collect();
+            assert_eq!(args[3], "--history");
+            assert_eq!(&args[5..], ["--", "三つ目"]);
+            let history: Vec<Value> = serde_json::from_str(args[4]).unwrap();
+            assert_eq!(history.len(), 4);
+            assert_eq!(history[0], json!({"role": "user", "text": "一つ目"}));
+            assert_eq!(history[1], json!({"role": "assistant", "text": "応答1"}));
+            // 長い応答は文字の途中で切らずに縮める
+            let long = history[3]["text"].as_str().unwrap();
+            assert!(long.len() <= ANSWER_LIMIT + "…（以下省略）".len());
+            assert!(long.ends_with("…（以下省略）"));
+        }
+
+        #[test]
+        fn old_turns_are_dropped_to_fit_the_budget() {
+            let mut c = Conversation::default();
+            for i in 0..20 {
+                c.record(TaskId::new(), &format!("依頼{i}"), &"x".repeat(4000));
+            }
+            let history = c.history();
+            let size: usize = history
+                .iter()
+                .map(|t| t["text"].as_str().unwrap().len())
+                .sum();
+            assert!(size <= HISTORY_BUDGET);
+            // 残るのは新しい方で、最後は最新のやりとり
+            assert_eq!(history[history.len() - 2]["text"], "依頼19");
+            assert_eq!(history[0]["role"], "user");
         }
 
         #[test]

@@ -1137,3 +1137,103 @@ fn the_interactive_console_asks_only_for_approvals_and_commits() {
         );
     });
 }
+
+/// 対話モードの会話：前のやりとりが次の依頼に渡り、前のタスクが触れたデータのラベルも引き継がれる。
+#[test]
+fn the_interactive_console_carries_the_conversation_and_its_labels() {
+    run_local(async {
+        let (claude_url, requests) = scripted_claude(vec![
+            tool_use_stream("sig-1", "toolu_1", "demo__read_private", json!({})),
+            text_stream("1", "私的データには予定が 3 件ありました"),
+            text_stream("2", "一番早い予定は月曜です"),
+        ])
+        .await;
+
+        let state_dir = std::env::temp_dir().join(format!("otasd-conv-{}", TaskId::new()));
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let key_file = state_dir.join("anthropic.key");
+        std::fs::write(&key_file, "sk-ant-conv-test").unwrap();
+        let config = Config::from_toml(&format!(
+            "state_dir = {state:?}\nlauncher = {launcher:?}\n[demo]\ntools = true\n\
+             [[models]]\nid = \"claude\"\nprovider = \"anthropic\"\nbase_url = \"{claude_url}\"\n\
+             api_key_file = {key:?}\n",
+            state = state_dir.display().to_string(),
+            launcher = launcher().display().to_string(),
+            key = key_file.display().to_string(),
+        ))
+        .unwrap();
+        let (daemon, console) = start_daemon(&config).await;
+
+        let mut child = Command::new(env!("CARGO_BIN_EXE_otas"))
+            .arg("--socket")
+            .arg(config.console_socket())
+            .args([
+                "chat",
+                "--model",
+                "claude",
+                "--agent",
+                env!("CARGO_BIN_EXE_otas-agent"),
+                "--tool",
+                "demo.*",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write;
+            let mut stdin = child.stdin.take().unwrap();
+            stdin
+                .write_all("予定を数えて\nその中で一番早いのは？\n/exit\n".as_bytes())
+                .unwrap();
+        }
+        let output = tokio::time::timeout(
+            Duration::from_secs(60),
+            tokio::task::spawn_blocking(move || child.wait_with_output()),
+        )
+        .await
+        .expect("対話モードが終わらない")
+        .unwrap()
+        .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(stdout.contains("一番早い予定は月曜です"), "{stdout}");
+
+        // 2 回目の依頼には、1 回目の依頼と応答が会話として入っている
+        let requests = requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 3);
+        let messages = &requests[2]["messages"];
+        let texts: Vec<String> = messages
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["content"].to_string())
+            .collect();
+        assert!(texts[0].contains("予定を数えて"), "{messages}");
+        assert_eq!(messages[1]["role"], "assistant", "{messages}");
+        assert!(
+            texts[1].contains("私的データには予定が 3 件ありました"),
+            "{messages}"
+        );
+        assert!(
+            texts.last().unwrap().contains("その中で一番早いのは？"),
+            "{messages}"
+        );
+
+        // 2 回目のタスクは私的データに触れていないが、1 回目のラベルを引き継いでいる
+        let tasks = console.tasks().await.unwrap();
+        assert_eq!(tasks.len(), 2);
+        for (task, _) in tasks {
+            assert!(
+                daemon
+                    .broker()
+                    .labels(task)
+                    .unwrap()
+                    .contains(otas_types::Label::Private),
+                "{task:?}"
+            );
+        }
+    });
+}

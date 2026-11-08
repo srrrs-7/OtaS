@@ -1,6 +1,6 @@
 //! OtaS の標準のエージェント。
 //!
-//! 使い方：`otas-agent --model <モデルの ID> [--max-steps N] [--max-tokens N] [--wait-approvals] <依頼>`
+//! 使い方：`otas-agent --model <モデルの ID> [--max-steps N] [--max-tokens N] [--wait-approvals] [--history <JSON>] [--] <依頼>`
 //! （`otasd` がサンドボックスの中で起動する）
 //!
 //! モデルにツールを選ばせて実行し、結果をモデルに返すことを、モデルが終わるまで繰り返す。
@@ -13,6 +13,9 @@
 //! - 承認待ちになったツールの呼び出しは、まだ実行されていないことをモデルに伝える
 //! - `--wait-approvals` を付けると、承認待ちで止まらずに人間の判断を待ち、承認されたら結果を受け取って続ける
 //!   （人間が画面の前にいるとき、たとえば `otas` の対話モードで使う）
+//! - `--history` で前のやりとりを渡すと、会話の続きとして扱う。形は
+//!   `[{"role": "user", "text": "..."}, {"role": "assistant", "text": "..."}, ...]`
+//!   （前のタスクのラベルは、依頼の `continues` でデーモンが引き継ぐ）
 //! - 経過は1行1件の JSON で標準出力に書く（監査とテストのため）
 
 use std::process::ExitCode;
@@ -38,7 +41,23 @@ struct Options {
     max_steps: usize,
     max_tokens: u32,
     wait_approvals: bool,
+    history: Vec<Turn>,
     goal: String,
+}
+
+/// 前のやりとりの1件。
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Turn {
+    role: Speaker,
+    text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Speaker {
+    User,
+    Assistant,
 }
 
 fn parse_args(args: &[String]) -> Result<Options, String> {
@@ -46,6 +65,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut max_steps = 20;
     let mut max_tokens = 16000;
     let mut wait_approvals = false;
+    let mut history = Vec::new();
     let mut rest = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -72,6 +92,19 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                 wait_approvals = true;
                 i += 1;
             }
+            "--history" => {
+                let json = args
+                    .get(i + 1)
+                    .ok_or("--history には JSON を指定してください")?;
+                history = serde_json::from_str(json)
+                    .map_err(|e| format!("--history の形式が不正です: {e}"))?;
+                i += 2;
+            }
+            // これより後はすべて依頼（依頼が - で始まっていても指定と取り違えない）
+            "--" => {
+                rest.extend(args[i + 1..].iter().cloned());
+                break;
+            }
             other => {
                 rest.push(other.to_string());
                 i += 1;
@@ -87,6 +120,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         max_steps,
         max_tokens,
         wait_approvals,
+        history,
         goal: rest.join(" "),
     })
 }
@@ -99,7 +133,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("otas-agent: {e}");
             eprintln!(
-                "使い方: otas-agent --model <ID> [--max-steps N] [--max-tokens N] [--wait-approvals] <依頼>"
+                "使い方: otas-agent --model <ID> [--max-steps N] [--max-tokens N] [--wait-approvals] [--history <JSON>] [--] <依頼>"
             );
             return ExitCode::from(2);
         }
@@ -321,10 +355,15 @@ mod agent {
             input_schema: t.input_schema.clone(),
         }));
 
-        let mut messages = vec![
-            Message::text(Role::System, SYSTEM_PROMPT),
-            Message::text(Role::User, options.goal.clone()),
-        ];
+        let mut messages = vec![Message::text(Role::System, SYSTEM_PROMPT)];
+        for turn in &options.history {
+            let role = match turn.role {
+                Speaker::User => Role::User,
+                Speaker::Assistant => Role::Assistant,
+            };
+            messages.push(Message::text(role, turn.text.clone()));
+        }
+        messages.push(Message::text(Role::User, options.goal.clone()));
 
         for step in 0..options.max_steps {
             let request = InferRequest {
@@ -423,5 +462,53 @@ mod agent {
             });
         }
         fail(format!("{} 回で終わりませんでした", options.max_steps))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn history_and_the_goal_after_the_separator_are_parsed() {
+        let o = parse_args(&args(&[
+            "--model",
+            "claude",
+            "--history",
+            r#"[{"role":"user","text":"前の依頼"},{"role":"assistant","text":"前の応答"}]"#,
+            "--",
+            "--model",
+            "の意味は？",
+        ]))
+        .unwrap();
+        assert_eq!(o.model, "claude");
+        assert_eq!(
+            o.history,
+            vec![
+                Turn {
+                    role: Speaker::User,
+                    text: "前の依頼".into()
+                },
+                Turn {
+                    role: Speaker::Assistant,
+                    text: "前の応答".into()
+                },
+            ]
+        );
+        assert_eq!(o.goal, "--model の意味は？");
+    }
+
+    #[test]
+    fn a_malformed_history_is_rejected() {
+        for bad in [r#"[{"role":"system","text":"x"}]"#, "{}", "["] {
+            assert!(
+                parse_args(&args(&["--model", "m", "--history", bad, "依頼"])).is_err(),
+                "{bad}"
+            );
+        }
     }
 }

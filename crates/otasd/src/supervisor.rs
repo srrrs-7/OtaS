@@ -79,6 +79,9 @@ pub struct TaskRequest {
     /// 資源の上限。
     #[serde(default)]
     pub limits: LimitsRequest,
+    /// 続きにする前のタスク。そのタスクのラベルを引き継ぐ（前の結果を入力に使うため）。
+    #[serde(default)]
+    pub continues: Option<TaskId>,
 }
 
 /// タスクの状態。
@@ -509,6 +512,11 @@ impl Supervisor {
             ));
         }
         let task = self.broker.spawn_task(request.grants.clone());
+        if let Some(previous) = request.continues
+            && let Err(e) = self.broker.inherit_labels(task, previous)
+        {
+            return Err(self.fail_start(task, e.into()));
+        }
 
         let view = match self.workspace.begin(task, &view_spec(&request.grants)) {
             Ok(v) => v,

@@ -367,6 +367,42 @@ async fn a_new_approval_is_announced_to_the_listener() {
     assert_eq!(seen[0].task, task);
 }
 
+/// 会話の続き：前のタスクのラベルを引き継ぎ、前の結果を通じた洗浄を防ぐ。
+#[tokio::test]
+async fn a_follow_up_task_inherits_the_labels_of_the_previous_one() {
+    let w = world();
+    let first = w.broker.spawn_task(all_tools());
+    w.broker
+        .call_tool(first, "mail.read", json!({}))
+        .await
+        .unwrap();
+    w.broker
+        .call_tool(first, "web.fetch", json!({}))
+        .await
+        .unwrap();
+
+    let next = w.broker.spawn_task(all_tools());
+    assert!(w.broker.labels(next).unwrap().is_empty());
+    w.broker.inherit_labels(next, first).unwrap();
+    assert_eq!(
+        w.broker.labels(next).unwrap(),
+        w.broker.labels(first).unwrap()
+    );
+    // 引き継いだので、次のタスクでも外部への送信は承認待ちになる
+    let held = w
+        .broker
+        .call_tool(next, "mail.send", json!({}))
+        .await
+        .unwrap();
+    assert!(held.pending().is_some());
+
+    let unknown = otas_types::TaskId::new();
+    assert!(matches!(
+        w.broker.inherit_labels(next, unknown),
+        Err(BrokerError::UnknownTask(_))
+    ));
+}
+
 #[tokio::test]
 async fn a_child_cannot_use_a_grant_it_was_not_given() {
     let w = world();
