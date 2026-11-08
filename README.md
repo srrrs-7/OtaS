@@ -10,6 +10,7 @@ AI エージェントにすべての作業を依頼する、Linux ベースの O
 - [調査 #002 ファイル管理](docs/research/002-file-management.md)
 - [設計 #001 モジュール構成・マルチエージェント・通知](docs/design/001-architecture.md)
 - [図解](docs/diagrams/index.html)（ブラウザで開く）
+- [構成図](docs/diagrams/structure.html)（実行時の構成・クレートの依存関係。ブラウザで開く）
 
 ## クレート構成
 
