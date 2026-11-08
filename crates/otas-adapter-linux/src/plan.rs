@@ -83,6 +83,9 @@ pub struct LaunchPlan {
     /// 名前空間を使う場合の計画（使わなければ `None`）。
     #[serde(default)]
     pub namespace: Option<NamespacePlan>,
+    /// 入る cgroup（起動役が最初に自分を移す。子孫はすべてこの中で動く）。
+    #[serde(default)]
+    pub cgroup: Option<PathBuf>,
 }
 
 /// 名前空間の中に見せるものの出どころ。

@@ -19,7 +19,7 @@ serde_json.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
 libc = "0.2"
-nix = { version = "0.31", features = ["mount", "sched", "user", "fs"] }
+nix = { version = "0.31", features = ["mount", "sched", "user", "fs", "process"] }
 rustix = { version = "1", features = ["process"] }
 seccompiler = "0.5"
 

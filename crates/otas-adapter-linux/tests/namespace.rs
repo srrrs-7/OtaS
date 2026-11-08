@@ -221,3 +221,83 @@ fn overlay_changes_land_in_the_upper_layer_only() {
     let whiteout = std::fs::symlink_metadata(upper.join("old.md")).unwrap();
     assert!(whiteout.file_type().is_char_device() && whiteout.rdev() == 0);
 }
+
+#[test]
+fn tasks_get_their_own_pid_namespace_and_proc() {
+    require_privileged!();
+    // 起動役の2段目が PID 1 になり、対象のプログラムは PID 2 で動く。/proc にはこの名前空間のプロセスだけが見える
+    let r = run(&sandbox(), sh("echo $$; ls /proc | grep -cE '^[0-9]+$'"));
+    assert!(r.ok, "{}", r.stderr);
+    let mut lines = r.stdout.lines();
+    assert_eq!(lines.next(), Some("2"), "{}", r.stdout);
+    let visible: u32 = lines.next().unwrap().parse().unwrap();
+    assert!(visible <= 6, "見えるプロセスが多すぎる: {visible}");
+}
+
+#[test]
+fn the_exit_code_of_the_program_is_passed_through() {
+    require_privileged!();
+    let sb = sandbox();
+    let mut process = sb.spawn(sh("exit 7")).unwrap();
+    assert_eq!(process.wait().unwrap().code, Some(7));
+}
+
+/// cgroups のテスト。スクリプトが子の cgroup に上限を配れるようにした環境（OTAS_TEST_CGROUP_ROOT）でだけ動かす。
+fn cgroup_base() -> Option<PathBuf> {
+    let root = std::env::var("OTAS_TEST_CGROUP_ROOT").ok()?;
+    Some(PathBuf::from(root).join(format!("otas-test-{}", TaskId::new().0.simple())))
+}
+
+#[test]
+fn process_limits_are_enforced_by_cgroups() {
+    require_privileged!();
+    let Some(base) = cgroup_base() else {
+        eprintln!("cgroups を使える環境でだけ動かします（OTAS_TEST_CGROUP_ROOT）");
+        return;
+    };
+    let sb = sandbox().with_cgroups(&base).unwrap();
+    let mut spec = sh("for i in 1 2 3 4 5 6 7 8 9 10; do sleep 1 & done; wait; echo done");
+    spec.limits.processes = Some(5);
+    let r = run(&sb, spec);
+    // 上限を超えたプロセスは作れない
+    assert!(
+        r.stderr.contains("Resource temporarily unavailable") || r.stderr.contains("fork"),
+        "{}",
+        r.stderr
+    );
+    // タスクの cgroup は片付けられている
+    let leftovers: Vec<_> = std::fs::read_dir(&base)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("task-"))
+        .collect();
+    assert!(leftovers.is_empty());
+    std::fs::remove_dir(&base).unwrap();
+}
+
+#[test]
+fn memory_limits_are_enforced_by_cgroups() {
+    require_privileged!();
+    let Some(base) = cgroup_base() else {
+        eprintln!("cgroups を使える環境でだけ動かします（OTAS_TEST_CGROUP_ROOT）");
+        return;
+    };
+    let sb = sandbox().with_cgroups(&base).unwrap();
+    // 64MB の文字列をメモリに置こうとする（上限は 16MB）
+    let mut spec = sh("x=$(head -c 67108864 /dev/zero | tr '\\0' a); echo ${#x}");
+    spec.limits.memory_bytes = Some(16 * 1024 * 1024);
+    let r = run(&sb, spec);
+    assert!(!r.ok, "上限を超えて確保できてしまった: {}", r.stdout);
+    std::fs::remove_dir(&base).unwrap();
+}
+
+#[test]
+fn cgroup_limits_without_cgroups_are_refused() {
+    require_privileged!();
+    let mut spec = sh("true");
+    spec.limits.processes = Some(5);
+    assert!(matches!(
+        sandbox().spawn(spec),
+        Err(SandboxError::InvalidSpec(_))
+    ));
+}

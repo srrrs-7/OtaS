@@ -24,6 +24,16 @@ mkfs.btrfs -q "$IMG"
 mkdir -p "$MNT"
 mount -o loop "$IMG" "$MNT"
 
+# cgroups v2：このコンテナの cgroup の中で、子の cgroup に上限を使えるようにする。
+# プロセスを持つ cgroup は子に上限を配れないので、今いるプロセスを葉（init）に移してから有効にする。
+CG=/sys/fs/cgroup
+mkdir -p "$CG/init"
+for pid in $(cat "$CG/cgroup.procs"); do
+    echo "$pid" > "$CG/init/cgroup.procs" 2>/dev/null || true
+done
+echo "+memory +pids +cpu" > "$CG/cgroup.subtree_control"
+export OTAS_TEST_CGROUP_ROOT="$CG"
+
 export OTAS_TEST_PRIVILEGED=1
 export OTAS_TEST_BTRFS_DIR="$MNT"
 cargo test --workspace "$@"

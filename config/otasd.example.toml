@@ -25,6 +25,9 @@ snapshot = "absent"
 mode = "landlock"
 # uid = 1000
 # gid = 1000
+# デーモンに任された cgroup（systemd のユニットで Delegate=yes を指定し、その cgroup を書く）。
+# 指定すると、タスクごとにメモリ・プロセス数・CPU の上限をかけられる（limits の memory_bytes・processes・cpu_percent）。
+# cgroup = "/sys/fs/cgroup/system.slice/otasd.service"
 
 # 版の方式。hardlink（既定、保証 Weak）か btrfs（読み取り専用スナップショット、保証 Strong）。
 # btrfs は state_dir を Btrfs 上に置き、store/live をサブボリュームとして用意し、sandbox を namespace にする。

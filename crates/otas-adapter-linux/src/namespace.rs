@@ -1,7 +1,7 @@
 //! 名前空間の準備。起動役が root として動いている間に行い、終わったら一般ユーザーに切り替える。
 //!
-//! 1. マウント・ネットワーク・IPC・UTS の名前空間を新しく作る（ネットワークは空なので外に出られない）
-//! 2. 空の tmpfs を新しいルートにして、許可したものだけを置く
+//! 1. マウント・ネットワーク・IPC・UTS・PID の名前空間を新しく作る（ネットワークは空なので外に出られない）
+//! 2. 空の tmpfs を新しいルートにして、許可したものだけを置く（PID 名前空間の中だけが見える `/proc` も置く）
 //!    - `fs` の規則のパスは同じパスで（シンボリックリンクはリンクとして）
 //!    - `mounts` は指定したパスに（bind mount または OverlayFS）
 //!    - `/tmp` はタスク専用の tmpfs
@@ -145,24 +145,32 @@ fn mount_one(root: &Path, m: &PlanMount) -> Result<(), String> {
 }
 
 /// 名前空間に入り、新しいルートを組み立てて移り、一般ユーザーに切り替える。
-pub(crate) fn enter(plan: &NamespacePlan, fs_rules: &[PlanFsRule]) -> Result<(), String> {
+/// 名前空間を作る（起動役の1段目）。PID 名前空間は、この後に作る子プロセスから有効になる。
+pub(crate) fn unshare_all() -> Result<(), String> {
+    if !nix::unistd::getuid().is_root() {
+        return Err("名前空間のサンドボックスは root で起動してください".into());
+    }
+    unshare(
+        CloneFlags::CLONE_NEWNS
+            | CloneFlags::CLONE_NEWNET
+            | CloneFlags::CLONE_NEWIPC
+            | CloneFlags::CLONE_NEWUTS
+            | CloneFlags::CLONE_NEWPID,
+    )
+    .map_err(|e| fail("名前空間を作れません", e))?;
+    // ここから先のマウントが元の名前空間に漏れないようにする
+    mount(NONE, "/", NONE, MsFlags::MS_REC | MsFlags::MS_PRIVATE, NONE)
+        .map_err(|e| fail("マウントの伝播を止められません", e))
+}
+
+/// 新しいルートを組み立てて移り、一般ユーザーに切り替える（起動役の2段目。PID 名前空間の PID 1 として動く）。
+pub(crate) fn build_root(plan: &NamespacePlan, fs_rules: &[PlanFsRule]) -> Result<(), String> {
     if !nix::unistd::getuid().is_root() {
         return Err("名前空間のサンドボックスは root で起動してください".into());
     }
     if plan.uid == 0 || plan.gid == 0 {
         return Err("タスクを root として動かすことはできません".into());
     }
-
-    unshare(
-        CloneFlags::CLONE_NEWNS
-            | CloneFlags::CLONE_NEWNET
-            | CloneFlags::CLONE_NEWIPC
-            | CloneFlags::CLONE_NEWUTS,
-    )
-    .map_err(|e| fail("名前空間を作れません", e))?;
-    // ここから先のマウントが元の名前空間に漏れないようにする
-    mount(NONE, "/", NONE, MsFlags::MS_REC | MsFlags::MS_PRIVATE, NONE)
-        .map_err(|e| fail("マウントの伝播を止められません", e))?;
 
     let root = &plan.root;
     mount(
@@ -185,6 +193,18 @@ pub(crate) fn enter(plan: &NamespacePlan, fs_rules: &[PlanFsRule]) -> Result<(),
         Some("mode=1777"),
     )
     .map_err(|e| fail("/tmp をマウントできません", e))?;
+
+    // この PID 名前空間のプロセスだけが見える /proc
+    let proc_dir = root.join("proc");
+    fs::create_dir_all(&proc_dir).map_err(|e| fail("/proc を作れません", e))?;
+    mount(
+        Some("proc"),
+        &proc_dir,
+        Some("proc"),
+        MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
+        NONE,
+    )
+    .map_err(|e| fail("/proc をマウントできません", e))?;
 
     for rule in fs_rules {
         expose(root, rule)?;

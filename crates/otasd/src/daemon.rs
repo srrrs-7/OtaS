@@ -166,20 +166,25 @@ impl Daemon {
 pub fn sandbox_from_config(config: &Config) -> Result<Arc<dyn Sandbox>, DaemonError> {
     use crate::config::SandboxMode;
     use otas_adapter_linux::{LinuxSandbox, NamespaceConfig};
-    match config.sandbox.mode {
-        SandboxMode::Landlock => Ok(Arc::new(LinuxSandbox::detect(&config.launcher)?)),
+    let sandbox = match config.sandbox.mode {
+        SandboxMode::Landlock => LinuxSandbox::detect(&config.launcher)?,
         SandboxMode::Namespace => {
             let (uid, gid) = config.task_owner().ok_or_else(|| {
                 DaemonError::Config("namespace では [sandbox] の uid と gid が必要です".into())
             })?;
-            Ok(Arc::new(LinuxSandbox::detect_namespaced(
+            LinuxSandbox::detect_namespaced(
                 &config.launcher,
                 NamespaceConfig {
                     uid,
                     gid,
                     run_dir: config.run_dir(),
                 },
-            )?))
+            )?
         }
-    }
+    };
+    let sandbox = match &config.sandbox.cgroup {
+        Some(base) => sandbox.with_cgroups(base)?,
+        None => sandbox,
+    };
+    Ok(Arc::new(sandbox))
 }

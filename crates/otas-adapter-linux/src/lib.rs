@@ -33,6 +33,7 @@
 
 #![cfg(target_os = "linux")]
 
+mod cgroup;
 mod landlock_rules;
 mod launch;
 mod namespace;
@@ -40,7 +41,8 @@ mod plan;
 mod sandbox;
 mod seccomp_filter;
 
-pub use launch::exec_sandboxed;
+pub use cgroup::CgroupManager;
+pub use launch::{exec_sandboxed, run_pid1};
 pub use plan::{
     LaunchPlan, NamespacePlan, PlanAccess, PlanFsRule, PlanLimits, PlanMount, PlanMountSource,
 };

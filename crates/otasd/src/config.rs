@@ -64,6 +64,10 @@ pub struct SandboxConfig {
     /// `namespace` のとき、タスクを動かすグループ（0 以外）。
     #[serde(default)]
     pub gid: Option<u32>,
+    /// デーモンに任された cgroup（systemd の `Delegate=yes` のユニットの cgroup など）。
+    /// 指定すると、タスクごとに cgroup を作り、メモリ・プロセス数・CPU の上限をかけられる。
+    #[serde(default)]
+    pub cgroup: Option<PathBuf>,
 }
 
 /// データ（正本）の設定。

@@ -1,5 +1,6 @@
 //! [`Sandbox`] の Linux 実装。
 
+use crate::cgroup::CgroupManager;
 use crate::landlock_rules;
 use crate::plan::{LaunchPlan, NamespacePlan, PlanAccess, PlanFsRule, PlanMount, PlanMountSource};
 use otas_ports::{
@@ -9,6 +10,7 @@ use otas_types::{Guarantees, Level, TaskId};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
+use std::sync::Arc;
 
 /// 起動役が制限の適用や exec に失敗したときの終了コード。
 pub const LAUNCHER_FAILURE_EXIT_CODE: i32 = 125;
@@ -58,6 +60,7 @@ pub struct LinuxSandbox {
     launcher: PathBuf,
     system: Vec<PlanFsRule>,
     namespace: Option<NamespaceConfig>,
+    cgroups: Option<Arc<CgroupManager>>,
 }
 
 impl LinuxSandbox {
@@ -75,7 +78,15 @@ impl LinuxSandbox {
             launcher,
             system: system_rules(),
             namespace: None,
+            cgroups: None,
         })
+    }
+
+    /// cgroups v2 で資源の上限（メモリ・プロセス数・CPU）をかけられるようにする。
+    /// `base` はデーモンに任された cgroup（systemd の `Delegate=yes` など）。
+    pub fn with_cgroups(mut self, base: impl Into<PathBuf>) -> Result<Self, SandboxError> {
+        self.cgroups = Some(Arc::new(CgroupManager::open(base)?));
+        Ok(self)
     }
 
     /// 名前空間を使う方式で作る。デーモンが root で動いている必要がある。
@@ -170,6 +181,7 @@ impl LinuxSandbox {
             deny_network: matches!(spec.net, NetPolicy::Deny),
             limits: spec.limits.into(),
             namespace,
+            cgroup: None,
         })
     }
 }
@@ -189,7 +201,21 @@ impl Sandbox for LinuxSandbox {
     }
 
     fn spawn(&self, spec: SandboxSpec) -> Result<Box<dyn SandboxProcess>, SandboxError> {
-        let plan = self.plan(&spec)?;
+        let mut plan = self.plan(&spec)?;
+        // cgroups が必要な上限が指定されているのに使えなければ、上限なしでは動かさない
+        if spec.limits.needs_cgroup() && self.cgroups.is_none() {
+            return Err(SandboxError::InvalidSpec(
+                "メモリ・プロセス数・CPU の上限には cgroups の設定が必要です".into(),
+            ));
+        }
+        let cgroup = match &self.cgroups {
+            Some(manager) => {
+                let dir = manager.create(&spec.limits)?;
+                plan.cgroup = Some(dir.clone());
+                Some((manager.clone(), dir))
+            }
+            None => None,
+        };
         // 新しいルートを組み立てる空のディレクトリ。名前空間が消えれば空に戻るので、終了後に消す
         let cleanup = match &plan.namespace {
             Some(ns) => {
@@ -207,20 +233,33 @@ impl Sandbox for LinuxSandbox {
             .stdin(spec.stdin)
             .stdout(spec.stdout)
             .stderr(spec.stderr)
-            .spawn()?;
-        Ok(Box::new(LinuxProcess { child, cleanup }))
+            .spawn()
+            .inspect_err(|_| {
+                if let Some((manager, dir)) = &cgroup {
+                    manager.remove(dir);
+                }
+            })?;
+        Ok(Box::new(LinuxProcess {
+            child,
+            cleanup,
+            cgroup,
+        }))
     }
 }
 
 struct LinuxProcess {
     child: Child,
     cleanup: Option<PathBuf>,
+    cgroup: Option<(Arc<CgroupManager>, PathBuf)>,
 }
 
 impl LinuxProcess {
     fn finished(&mut self) {
         if let Some(dir) = self.cleanup.take() {
             let _ = std::fs::remove_dir(dir);
+        }
+        if let Some((manager, dir)) = self.cgroup.take() {
+            manager.remove(&dir);
         }
     }
 }

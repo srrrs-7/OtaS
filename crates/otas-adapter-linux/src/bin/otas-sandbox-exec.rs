@@ -12,9 +12,15 @@ const FAILURE: u8 = 125;
 
 #[cfg(target_os = "linux")]
 fn main() -> ExitCode {
-    let Some(json) = std::env::args().nth(1) else {
-        eprintln!("otas-sandbox-exec: 起動計画（JSON）を引数で渡してください");
-        return ExitCode::from(FAILURE);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `--pid1` は、名前空間の中で起動し直された2段目（PID 1）
+    let (pid1, json) = match args.as_slice() {
+        [flag, json] if flag == "--pid1" => (true, json.clone()),
+        [json] => (false, json.clone()),
+        _ => {
+            eprintln!("otas-sandbox-exec: 起動計画（JSON）を引数で渡してください");
+            return ExitCode::from(FAILURE);
+        }
     };
     let plan: otas_adapter_linux::LaunchPlan = match serde_json::from_str(&json) {
         Ok(plan) => plan,
@@ -23,7 +29,12 @@ fn main() -> ExitCode {
             return ExitCode::from(FAILURE);
         }
     };
-    match otas_adapter_linux::exec_sandboxed(&plan) {
+    let result = if pid1 {
+        otas_adapter_linux::run_pid1(&plan)
+    } else {
+        otas_adapter_linux::exec_sandboxed(&plan)
+    };
+    match result {
         Ok(never) => match never {},
         Err(e) => {
             eprintln!("otas-sandbox-exec: {e}");

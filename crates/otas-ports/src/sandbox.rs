@@ -76,6 +76,19 @@ pub struct ResourceLimits {
     pub file_size_bytes: Option<u64>,
     /// 同時に開けるファイルの数。
     pub open_files: Option<u64>,
+    /// メモリの上限（バイト。cgroups が必要）。
+    pub memory_bytes: Option<u64>,
+    /// プロセス数の上限（cgroups が必要）。
+    pub processes: Option<u64>,
+    /// CPU の上限（1 コアを 100 とした割合。cgroups が必要）。
+    pub cpu_percent: Option<u32>,
+}
+
+impl ResourceLimits {
+    /// cgroups が必要な上限が指定されているか。
+    pub fn needs_cgroup(&self) -> bool {
+        self.memory_bytes.is_some() || self.processes.is_some() || self.cpu_percent.is_some()
+    }
 }
 
 /// サンドボックスで起動するプロセスの指定。

@@ -34,6 +34,12 @@ pub struct LimitsRequest {
     pub file_size_bytes: Option<u64>,
     /// 同時に開けるファイルの数。
     pub open_files: Option<u64>,
+    /// メモリの上限（バイト。サンドボックスに cgroups の設定が必要）。
+    pub memory_bytes: Option<u64>,
+    /// プロセス数の上限（cgroups が必要）。
+    pub processes: Option<u64>,
+    /// CPU の上限（1 コアを 100 とした割合。cgroups が必要）。
+    pub cpu_percent: Option<u32>,
 }
 
 impl From<LimitsRequest> for ResourceLimits {
@@ -43,6 +49,9 @@ impl From<LimitsRequest> for ResourceLimits {
             address_space_bytes: l.address_space_bytes,
             file_size_bytes: l.file_size_bytes,
             open_files: l.open_files,
+            memory_bytes: l.memory_bytes,
+            processes: l.processes,
+            cpu_percent: l.cpu_percent,
         }
     }
 }

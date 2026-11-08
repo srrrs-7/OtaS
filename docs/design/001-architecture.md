@@ -513,3 +513,38 @@ Rust には公式の Anthropic SDK がないので、HTTP で直接呼んでい�
 - **ツールの呼び出し**：`InferRequest.tools`、`InferResponse.tool_calls` / `stop_reason`、`Message.tool_calls` / `tool_results` / `provider_raw`。
 - **Claude API のストリーミング**：`stream: true` で受け取り、最後まで組み立てて返す。思考・本文・ツールの引数の差分をつなぎ、ストリームの途中のエラーや拒否も扱う。HTTP のタイムアウトは全体ではなく、データが途切れている時間で判定する。
 - **OpenAI 互換 API**：function calling に対応した。
+
+## 17. 実装メモ：PID 名前空間と cgroups
+
+### PID 名前空間（2段の起動役）
+
+`unshare(CLONE_NEWPID)` は呼んだプロセス自身ではなく、その次に作る子から効く。そこで起動役 `otas-sandbox-exec` を2段にした。
+
+```text
+otasd ─ spawn ─> otas-sandbox-exec <計画>          1段目：cgroup に入る・上限・unshare（NEWNS|NEWNET|NEWIPC|NEWUTS|NEWPID）
+                   └─ fork+exec ─> otas-sandbox-exec --pid1 <計画>   2段目：新しい名前空間の PID 1
+                                     │ build_root（tmpfs の根・/proc・pivot_root・uid/gid を落とす）
+                                     │ Landlock・seccomp
+                                     └─ spawn ─> 対象のプログラム（PID 2）
+```
+
+- 2段目は PID 1 として孤児を回収し（`waitpid(-1)`）、対象のプログラムの終了コード（シグナルなら 128+番号）で終わる。PID 1 が終わるとカーネルが名前空間の残りのプロセスを止めるので、タスクのプロセスが外に残らない。
+- `/proc` はこの名前空間用に新しくマウントする（nosuid・nodev・noexec、Landlock では読み取りだけ）。他のタスクやデーモンのプロセスは見えない。
+- 1段目と2段目の両方で `PR_SET_PDEATHSIG` を設定し、デーモンが落ちたら連鎖して止まる。
+
+### cgroups v2
+
+`[sandbox] cgroup` にデーモンへ任された cgroup（systemd の `Delegate=yes`）を指定すると、`CgroupManager` がタスクごとに `task-<id>` を作る。
+
+| 上限（`ResourceLimits`） | cgroup のファイル |
+|---|---|
+| `memory_bytes` | `memory.max`（`memory.swap.max = 0` でスワップへの逃げ道も塞ぐ） |
+| `processes` | `pids.max` |
+| `cpu_percent` | `cpu.max`（`<割合×1000> 100000`） |
+
+- cgroups v2 では子を持つ cgroup にプロセスを置けないため、デーモン自身は `<base>/supervisor` に移る。
+- 起動役の1段目が `cgroup.procs` に自分を書いてから名前空間を作るので、子孫はすべてタスクの cgroup の中で動く。
+- タスクが終わると `cgroup.kill` で残りを止め、cgroup を消す。
+- cgroup の上限を求められたのに cgroup が設定されていなければ、黙って無視せず `InvalidSpec` で断る（rlimit で代わりにできるのはプロセスごとの上限だけで、タスク全体の上限にはならないため）。
+
+テストでは `scripts/test-privileged.sh` がコンテナの cgroup のプロセスを `init` に移し、子で memory・pids・cpu を使えるようにしてから、PID 名前空間（`$$` が 2）、プロセス数の上限、メモリの上限（16MB の上限で 64MB を確保させる）を確かめる。
