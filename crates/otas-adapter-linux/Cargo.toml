@@ -1,0 +1,26 @@
+[package]
+name = "otas-adapter-linux"
+description = "OtaS の Linux アダプタ（Landlock と seccomp によるサンドボックス）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "otas-sandbox-exec"
+path = "src/bin/otas-sandbox-exec.rs"
+
+[dependencies]
+otas-ports.workspace = true
+otas-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+libc = "0.2"
+rustix = { version = "1", features = ["process"] }
+seccompiler = "0.5"
+
+[lints]
+workspace = true

@@ -9,13 +9,14 @@ members = [
     "crates/otas-broker",
     "crates/otas-ipc",
     "crates/otas-testkit",
+    "crates/otas-adapter-linux",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.85"
+rust-version = "1.87"
 
 [workspace.dependencies]
 async-trait = "0.1"

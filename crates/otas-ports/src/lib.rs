@@ -3,9 +3,16 @@
 //! 中核（ブローカーなど）はこのクレートの trait だけに依存する。
 //! ポリシー、監査ログ、ツール、モデルの実装はすべて付け替えられる。
 //!
-//! MVP では、ブローカーが使う trait だけを定義する。
-//! サンドボックス、作業領域、イベントバス、通知などの trait は次の段階で追加する
+//! 現在定義しているのは、ブローカーが使う trait（ポリシー・監査ログ・ツール・モデル）と、
+//! サンドボックスの trait。作業領域、イベントバス、通知などの trait は次の段階で追加する
 //! （`docs/design/001-architecture.md` §4）。
+
+mod sandbox;
+
+pub use sandbox::{
+    ExitInfo, FsAccess, FsRule, NetPolicy, ResourceLimits, Sandbox, SandboxError, SandboxProcess,
+    SandboxSpec,
+};
 
 use async_trait::async_trait;
 use otas_types::{

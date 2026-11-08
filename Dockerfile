@@ -2,6 +2,10 @@
 # ホストではビルドもテストも実行しない。ソースはビルド時に COPY し、ホストのディレクトリはマウントしない。
 FROM rust:1.99-slim-bookworm
 
+# OtaS のイメージだけを選んで掃除できるようにする:
+#   docker image prune -f --filter label=org.otas.dev=true
+LABEL org.otas.dev="true"
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends capnproto pkg-config ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \

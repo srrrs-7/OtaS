@@ -23,6 +23,7 @@ AI エージェントにすべての作業を依頼する、Linux ベースの O
 | `otas-broker` | ブローカー（判定・実行前の記録・実行・ラベル伝播・承認） |
 | `otas-ipc` | IPC 層（Cap'n Proto RPC）。タスクごとの窓口と承認の窓口をケイパビリティとして公開する |
 | `otas-testkit` | テスト用の偽のツール・モデルと、標準構成のブローカー（公開しない） |
+| `otas-adapter-linux` | Linux のサンドボックス（Landlock・seccomp・資源の上限）。起動役 `otas-sandbox-exec` を含む |
 
 ## 開発
 
@@ -45,6 +46,12 @@ docker compose run --build --rm dev cargo fmt --all --check
 docker compose run --build --name otas-sync dev cargo fmt --all
 docker cp otas-sync:/workspace/crates/. ./crates/
 docker rm otas-sync
+```
+
+`--build` のたびに古いイメージが残ります。OtaS のイメージだけを選んで掃除するには、ラベルで絞り込みます（他のプロジェクトのイメージには触れません）。
+
+```sh
+docker image prune -f --filter label=org.otas.dev=true
 ```
 
 ## ライセンス
