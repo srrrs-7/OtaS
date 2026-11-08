@@ -1,0 +1,22 @@
+# otasd の設定の例
+#
+#   otasd --config config/otasd.example.toml
+
+# 状態を置くディレクトリ（監査ログ audit.jsonl、人間向けの窓口 console.sock、タスクのログ tasks/）
+# 所有者だけが使える権限（0700）に設定される。
+state_dir = "/var/lib/otas"
+
+# サンドボックスの起動役（otas-adapter-linux の otas-sandbox-exec）
+launcher = "/usr/local/libexec/otas-sandbox-exec"
+
+[policy.external_requires]
+# 外部に作用する操作（送信、クラウドのモデルへの入力など）を許すのに必要な実行環境の保証。
+# 既定値は Linux のサンドボックスが現在保証できる範囲。保証を上げたら、ここも上げる。
+fs_isolation = "strong"
+net_isolation = "strong"
+syscall_filter = "weak"
+snapshot = "absent"
+
+[demo]
+# 動作確認用のツール（demo.*）を登録する。本番では false にする。
+tools = false

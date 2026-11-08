@@ -24,6 +24,22 @@ AI エージェントにすべての作業を依頼する、Linux ベースの O
 | `otas-ipc` | IPC 層（Cap'n Proto RPC）。タスクごとの窓口と承認の窓口をケイパビリティとして公開する |
 | `otas-testkit` | テスト用の偽のツール・モデルと、標準構成のブローカー（公開しない） |
 | `otas-adapter-linux` | Linux のサンドボックス（Landlock・seccomp・資源の上限）。起動役 `otas-sandbox-exec` を含む |
+| `otasd` | デーモン `otasd`、CLI `otas`、動作確認用のエージェント `otas-demo-agent` |
+
+## 動きの概要
+
+```text
+人間 ── otas（CLI）── console.sock ──▶ otasd ─┬─ ブローカー（判定・監査ログ）
+                                                └─ 監督 ── サンドボックス ── エージェント
+                                                             （stdin がタスク専用の窓口）
+```
+
+1. 人間が `otas submit` でタスクを依頼する（プログラム・引数・権限）。
+2. `otasd` はタスクを作り、エージェントをサンドボックスで起動して、そのタスク専用の窓口を stdin として渡す。見えるファイルは権限（`read` / `write`）から自動で決まる。
+3. エージェントの操作はすべて窓口（ブローカー）を通り、判定されて監査ログに残る。高リスクの操作は承認待ちになる。
+4. 人間が `otas pending` で確認し、`otas approve` / `otas reject` で決める。
+
+設定の例は [config/otasd.example.toml](config/otasd.example.toml)、依頼から承認までの通しの流れは `crates/otasd/tests/e2e.rs` を参照してください。
 
 ## 開発
 

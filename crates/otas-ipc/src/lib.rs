@@ -22,8 +22,11 @@ mod client;
 mod convert;
 mod server;
 
-pub use client::{ApproverClient, PendingItem, Remote, TaskClient, connect_approver, connect_task};
-pub use server::{Sessions, serve_approver, serve_task};
+pub use client::{
+    ApproverClient, ConsoleClient, PendingItem, Remote, TaskClient, connect_approver,
+    connect_console, connect_task,
+};
+pub use server::{ConsoleBackend, Sessions, serve_approver, serve_console, serve_task};
 
 use tokio::net::UnixStream;
 

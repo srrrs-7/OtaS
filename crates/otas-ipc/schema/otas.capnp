@@ -69,3 +69,17 @@ interface Approver {
   approve @1 (id :Text) -> (result :CallResult);
   reject @2 (id :Text) -> ();
 }
+
+struct TaskInfo {
+  id @0 :Text;
+  statusJson @1 :Text;     # 状態（JSON。形はデーモンが決める）
+}
+
+# 人間向けの窓口。タスクの依頼と一覧、承認の窓口を提供する。
+# デーモンが接続元のユーザーを確かめたうえで、人間向けの画面（CLI など）にだけ渡す。
+interface Console {
+  # タスクを依頼する（requestJson の形はデーモンが決める）。
+  submit @0 (requestJson :Text) -> (taskId :Text);
+  tasks @1 () -> (items :List(TaskInfo));
+  approver @2 () -> (approver :Approver);
+}

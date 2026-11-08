@@ -1,0 +1,108 @@
+//! 動作確認用のエージェント。
+//!
+//! 使い方：`otas-demo-agent '<手順の JSON 配列>'`（`otasd` がサンドボックスで起動する）
+//!
+//! 手順の例：
+//!
+//! ```json
+//! [
+//!   {"tool": "demo.read_private"},
+//!   {"tool": "demo.send", "args": {"to": "someone@example.com"}},
+//!   {"read_file": "/etc/passwd"}
+//! ]
+//! ```
+//!
+//! ツールは標準入力として渡されたタスク専用の窓口（ブローカー）経由で呼ぶ。
+//! `read_file` はブローカーを通さずにファイルを直接読もうとする（サンドボックスの確認用）。
+//! 結果は1手順につき1行の JSON で標準出力に書く。
+
+use serde::Deserialize;
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Step {
+    Tool {
+        tool: String,
+        #[serde(default)]
+        args: serde_json::Value,
+    },
+    ReadFile {
+        read_file: PathBuf,
+    },
+}
+
+#[cfg(unix)]
+fn main() -> ExitCode {
+    let Some(steps) = std::env::args().nth(1) else {
+        eprintln!("使い方: otas-demo-agent '<手順の JSON 配列>'");
+        return ExitCode::from(2);
+    };
+    let steps: Vec<Step> = match serde_json::from_str(&steps) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("otas-demo-agent: 手順を読めません: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("otas-demo-agent: 実行環境を作れません: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    tokio::task::LocalSet::new().block_on(&runtime, run(steps))
+}
+
+#[cfg(unix)]
+async fn run(steps: Vec<Step>) -> ExitCode {
+    use otas_ipc::{Remote, TaskClient};
+    use serde_json::json;
+
+    let client = match TaskClient::from_stdin() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("otas-demo-agent: 窓口に接続できません: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    for (i, step) in steps.into_iter().enumerate() {
+        let line = match step {
+            Step::Tool { tool, args } => match client.call_tool(&tool, &args).await {
+                Ok(Remote::Done(value)) => {
+                    json!({"step": i, "tool": tool, "result": "done", "value": value})
+                }
+                Ok(Remote::Pending(id)) => {
+                    json!({"step": i, "tool": tool, "result": "pending", "approval": id.0})
+                }
+                Ok(Remote::Denied(reason)) => {
+                    json!({"step": i, "tool": tool, "result": "denied", "reason": reason})
+                }
+                Err(e) => {
+                    json!({"step": i, "tool": tool, "result": "error", "error": e.to_string()})
+                }
+            },
+            Step::ReadFile { read_file } => match std::fs::read(&read_file) {
+                Ok(bytes) => {
+                    json!({"step": i, "read_file": read_file, "result": "done", "bytes": bytes.len()})
+                }
+                Err(e) => {
+                    json!({"step": i, "read_file": read_file, "result": "error", "error": e.to_string()})
+                }
+            },
+        };
+        println!("{line}");
+    }
+    ExitCode::SUCCESS
+}
+
+#[cfg(not(unix))]
+fn main() -> ExitCode {
+    eprintln!("otas-demo-agent: 現在は Unix 専用です");
+    ExitCode::FAILURE
+}

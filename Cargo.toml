@@ -10,6 +10,7 @@ members = [
     "crates/otas-ipc",
     "crates/otas-testkit",
     "crates/otas-adapter-linux",
+    "crates/otasd",
 ]
 
 [workspace.package]
@@ -29,6 +30,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
+toml = "1"
 tokio = { version = "1", features = ["macros", "rt"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
@@ -40,6 +42,7 @@ otas-audit = { path = "crates/otas-audit" }
 otas-broker = { path = "crates/otas-broker" }
 otas-ipc = { path = "crates/otas-ipc" }
 otas-testkit = { path = "crates/otas-testkit" }
+otas-adapter-linux = { path = "crates/otas-adapter-linux" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

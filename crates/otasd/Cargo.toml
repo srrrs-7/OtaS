@@ -1,0 +1,41 @@
+[package]
+name = "otasd"
+description = "OtaS のデーモン（otasd）と CLI（otas）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "otasd"
+path = "src/bin/otasd.rs"
+
+[[bin]]
+name = "otas"
+path = "src/bin/otas.rs"
+
+[[bin]]
+name = "otas-demo-agent"
+path = "src/bin/otas-demo-agent.rs"
+
+[dependencies]
+async-trait.workspace = true
+otas-audit.workspace = true
+otas-broker.workspace = true
+otas-ipc.workspace = true
+otas-policy.workspace = true
+otas-ports.workspace = true
+otas-types.workspace = true
+rustix = { version = "1", features = ["process"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "rt", "macros", "signal", "time"] }
+toml.workspace = true
+uuid.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+otas-adapter-linux.workspace = true
+
+[lints]
+workspace = true

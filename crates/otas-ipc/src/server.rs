@@ -1,7 +1,7 @@
 //! サーバ側（ブローカーを公開する側）。
 
 use crate::convert::{read_labels, role_from_wire, text, write_labels};
-use crate::otas_capnp::{approver, call_result, task_session};
+use crate::otas_capnp::{approver, call_result, console, task_session};
 use capnp::capability::Rc;
 use capnp_rpc::{CapabilityServerSet, RpcSystem, rpc_twoparty_capnp, twoparty};
 use otas_broker::{Broker, BrokerError, CallResult, Completed};
@@ -265,5 +265,68 @@ pub fn serve_approver(
     broker: Arc<Broker>,
 ) -> impl Future<Output = Result<(), capnp::Error>> + 'static {
     let client: approver::Client = capnp_rpc::new_client(ApproverImpl { broker });
+    rpc_system(stream, client.client)
+}
+
+/// 人間向けの窓口の中身。タスクの依頼と一覧はデーモン（監督）が実装する。
+pub trait ConsoleBackend {
+    /// タスクを依頼する。
+    fn submit(&self, request_json: &str) -> Result<TaskId, String>;
+    /// タスクの一覧（ID と、状態の JSON）。
+    fn tasks(&self) -> Vec<(TaskId, String)>;
+}
+
+struct ConsoleImpl {
+    backend: std::rc::Rc<dyn ConsoleBackend>,
+    broker: Arc<Broker>,
+}
+
+impl console::Server for ConsoleImpl {
+    async fn submit(
+        self: Rc<Self>,
+        params: console::SubmitParams,
+        mut results: console::SubmitResults,
+    ) -> Result<(), capnp::Error> {
+        let request = text(params.get()?.get_request_json()?)?;
+        let task = self.backend.submit(&request).map_err(failed)?;
+        results.get().set_task_id(task.0.to_string());
+        Ok(())
+    }
+
+    async fn tasks(
+        self: Rc<Self>,
+        _params: console::TasksParams,
+        mut results: console::TasksResults,
+    ) -> Result<(), capnp::Error> {
+        let tasks = self.backend.tasks();
+        let mut list = results.get().init_items(tasks.len() as u32);
+        for (i, (id, status)) in tasks.iter().enumerate() {
+            let mut b = list.reborrow().get(i as u32);
+            b.set_id(id.0.to_string());
+            b.set_status_json(status);
+        }
+        Ok(())
+    }
+
+    async fn approver(
+        self: Rc<Self>,
+        _params: console::ApproverParams,
+        mut results: console::ApproverResults,
+    ) -> Result<(), capnp::Error> {
+        let approver: approver::Client = capnp_rpc::new_client(ApproverImpl {
+            broker: self.broker.clone(),
+        });
+        results.get().set_approver(approver);
+        Ok(())
+    }
+}
+
+/// 人間向けの窓口を公開する。接続元の確認（[`crate::verify_peer_uid`]）は、呼び出す前に済ませておく。
+pub fn serve_console(
+    stream: UnixStream,
+    backend: std::rc::Rc<dyn ConsoleBackend>,
+    broker: Arc<Broker>,
+) -> impl Future<Output = Result<(), capnp::Error>> + 'static {
+    let client: console::Client = capnp_rpc::new_client(ConsoleImpl { backend, broker });
     rpc_system(stream, client.client)
 }

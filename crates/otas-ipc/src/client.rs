@@ -2,7 +2,7 @@
 
 use crate::IpcError;
 use crate::convert::{label_to_wire, read_labels, role_to_wire, text};
-use crate::otas_capnp::{approver, call_result, task_session};
+use crate::otas_capnp::{approver, call_result, console, task_session};
 use capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty};
 use otas_ports::InferRequest;
 use otas_types::{Action, ApprovalId, GrantSet, LabelSet, TaskId};
@@ -75,6 +75,51 @@ pub fn connect_approver(stream: UnixStream) -> ApproverClient {
     }
 }
 
+/// 人間向けの窓口に接続する。`LocalSet` の中で呼ぶ必要がある。
+pub fn connect_console(stream: UnixStream) -> ConsoleClient {
+    ConsoleClient {
+        cap: bootstrap(stream),
+    }
+}
+
+/// 人間向けの窓口（タスクの依頼・一覧・承認）。
+#[derive(Clone)]
+pub struct ConsoleClient {
+    cap: console::Client,
+}
+
+impl ConsoleClient {
+    /// タスクを依頼する。
+    pub async fn submit(&self, request_json: &str) -> Result<TaskId, IpcError> {
+        let mut req = self.cap.submit_request();
+        req.get().set_request_json(request_json);
+        let response = req.send().promise.await?;
+        Ok(TaskId(parse_uuid(&text(response.get()?.get_task_id()?)?)?))
+    }
+
+    /// タスクの一覧（ID と、状態の JSON）。
+    pub async fn tasks(&self) -> Result<Vec<(TaskId, serde_json::Value)>, IpcError> {
+        let response = self.cap.tasks_request().send().promise.await?;
+        let mut items = Vec::new();
+        for item in response.get()?.get_items()?.iter() {
+            items.push((
+                TaskId(parse_uuid(&text(item.get_id()?)?)?),
+                serde_json::from_str(&text(item.get_status_json()?)?)?,
+            ));
+        }
+        Ok(items)
+    }
+
+    /// 承認の窓口。
+    pub fn approver(&self) -> ApproverClient {
+        // パイプライン化：応答を待たずに、返ってくるはずの窓口を使い始められる
+        let response = self.cap.approver_request().send();
+        ApproverClient {
+            cap: response.pipeline.get_approver(),
+        }
+    }
+}
+
 /// タスクの窓口。この窓口からの操作は、常に窓口に紐づいたタスクとして扱われる。
 #[derive(Clone)]
 pub struct TaskClient {
@@ -82,6 +127,16 @@ pub struct TaskClient {
 }
 
 impl TaskClient {
+    /// サンドボックスの中のエージェントが、標準入力として渡された窓口に接続する。
+    /// `LocalSet` の中で呼ぶ必要がある。
+    pub fn from_stdin() -> Result<TaskClient, IpcError> {
+        use std::os::fd::AsFd;
+        let fd = std::io::stdin().as_fd().try_clone_to_owned()?;
+        let stream = std::os::unix::net::UnixStream::from(fd);
+        stream.set_nonblocking(true)?;
+        Ok(connect_task(UnixStream::from_std(stream)?))
+    }
+
     /// ツールを呼ぶ。
     pub async fn call_tool(
         &self,
