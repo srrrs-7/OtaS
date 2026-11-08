@@ -683,3 +683,139 @@ fn approvals_and_reviews_survive_a_daemon_restart() {
         verify_chain(&records).unwrap();
     });
 }
+
+/// 名前空間の方式：エージェントには作業領域が `/data` として見え、それ以外は存在しない。
+/// 書き込みは OverlayFS の上の層に入り、コミットするまで正本は変わらない。
+/// 特権を足したテスト用のコンテナ（OTAS_TEST_PRIVILEGED=1）でだけ動かす。
+/// OTAS_TEST_BTRFS_DIR があれば、版を Btrfs の読み取り専用スナップショットにする。
+#[test]
+fn namespace_mode_shows_only_data_and_commits_through_overlay() {
+    if std::env::var("OTAS_TEST_PRIVILEGED").as_deref() != Ok("1") {
+        eprintln!("特権を足したテスト用のコンテナでだけ動かします（OTAS_TEST_PRIVILEGED=1）");
+        return;
+    }
+    let btrfs = std::env::var("OTAS_TEST_BTRFS_DIR").ok();
+    let base = btrfs
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let state_dir = base.join(format!("otasd-ns-{}", TaskId::new()));
+    let live = state_dir.join("store/live");
+    if btrfs.is_some() {
+        // Btrfs では、正本をサブボリュームとして先に作る（サブボリュームをまたぐ rename はできない）
+        std::fs::create_dir_all(state_dir.join("store")).unwrap();
+        let ok = Command::new("btrfs")
+            .args(["subvolume", "create"])
+            .arg(&live)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+    }
+    std::fs::create_dir_all(live.join("projects/a")).unwrap();
+    std::fs::create_dir_all(live.join("mail")).unwrap();
+    std::fs::write(live.join("projects/a/notes.md"), "v1").unwrap();
+    std::fs::write(live.join("mail/1.eml"), "私的なメール").unwrap();
+
+    let versions = if btrfs.is_some() { "btrfs" } else { "hardlink" };
+    let config = Config::from_toml(&format!(
+        "state_dir = {state:?}\nlauncher = {launcher:?}\n\
+         [sandbox]\nmode = \"namespace\"\nuid = 10001\ngid = 10001\n\
+         [data]\nversions = \"{versions}\"\n\
+         [[data.labels]]\npath = \"/data/mail\"\nlabels = [\"private\"]\n\
+         [demo]\ntools = true\n",
+        state = state_dir.display().to_string(),
+        launcher = launcher().display().to_string(),
+    ))
+    .unwrap();
+
+    run_local(async {
+        let sandbox = otasd::sandbox_from_config(&config).unwrap();
+        let daemon = Rc::new(Daemon::new(config.clone(), sandbox).unwrap());
+        let listener = daemon.bind().unwrap();
+        let serving = daemon.clone();
+        tokio::task::spawn_local(async move {
+            let _ = serving.serve(listener).await;
+        });
+        let console = connect_console(UnixStream::connect(config.console_socket()).await.unwrap());
+
+        let steps = json!([
+            {"read_file": "/data/mail/1.eml"},
+            {"write_file": "/data/projects/a/notes.md", "content": "v2"},
+            {"write_file": "/data/mail/1.eml", "content": "改ざん"},
+            {"read_file": "/etc/passwd"},
+            {"read_file": "$OTAS_DATA/projects/a/notes.md"},
+            {"tool": "demo.fetch_untrusted"},
+            {"tool": "demo.send"}
+        ]);
+        let request = json!({
+            "program": agent(),
+            "args": [steps.to_string()],
+            "grants": [
+                {"kind": "read", "prefix": "/data/mail"},
+                {"kind": "write", "prefix": "/data/projects/a"},
+                {"kind": "tool", "pattern": "demo.*"}
+            ]
+        });
+        let task = console.submit(&request.to_string()).await.unwrap();
+        let status = wait_for_exit(&console, task).await;
+        let stderr =
+            std::fs::read_to_string(daemon.supervisor().log_dir(task).join("stderr.log")).unwrap();
+        assert_eq!(status["state"], "awaiting_review", "{status} {stderr}");
+
+        let results = read_lines(&daemon.supervisor().log_dir(task).join("stdout.log"));
+        let kinds: Vec<&str> = results
+            .iter()
+            .map(|r| r["result"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["done", "done", "error", "error", "done", "done", "pending"],
+            "{results:#?}"
+        );
+        assert!(
+            results[2]["error"].as_str().unwrap().contains("Read-only"),
+            "{}",
+            results[2]
+        );
+        // /etc/passwd は読めないのではなく、存在しない
+        assert!(
+            results[3]["error"]
+                .as_str()
+                .unwrap()
+                .contains("No such file"),
+            "{}",
+            results[3]
+        );
+
+        // 正本はまだ変わらない。変更は上の層にある
+        assert_eq!(
+            std::fs::read_to_string(live.join("projects/a/notes.md")).unwrap(),
+            "v1"
+        );
+        assert_eq!(
+            console.review(task).await.unwrap(),
+            json!([{"path": "/data/projects/a/notes.md", "kind": "modified"}])
+        );
+        let committed = console.commit(task).await.unwrap();
+        assert_eq!(committed["result"], "applied", "{committed}");
+        assert_eq!(
+            std::fs::read_to_string(live.join("projects/a/notes.md")).unwrap(),
+            "v2"
+        );
+        // 正本のファイルはタスクのユーザーのもの
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            std::fs::metadata(live.join("projects/a/notes.md"))
+                .unwrap()
+                .uid(),
+            10001
+        );
+        if btrfs.is_some() {
+            // 版は読み取り専用のスナップショット
+            let err = std::fs::write(state_dir.join("store/versions/2/projects/a/notes.md"), "x")
+                .unwrap_err();
+            assert_eq!(err.raw_os_error(), Some(30));
+        }
+    });
+}

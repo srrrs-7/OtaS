@@ -23,8 +23,8 @@ AI エージェントにすべての作業を依頼する、Linux ベースの O
 | `otas-broker` | ブローカー（判定・実行前の記録・実行・ラベル伝播・承認） |
 | `otas-ipc` | IPC 層（Cap'n Proto RPC）。タスクごとの窓口と承認の窓口をケイパビリティとして公開する |
 | `otas-testkit` | テスト用の偽のツール・モデルと、標準構成のブローカー（公開しない） |
-| `otas-adapter-linux` | Linux のサンドボックス（Landlock・seccomp・資源の上限）。起動役 `otas-sandbox-exec` を含む |
-| `otas-workspace` | 作業領域と正本の版管理（ハードリンクによる、特権を使わない実装）。3者比較によるコミット、巻き戻し、ファイルを通じたラベルの伝播 |
+| `otas-adapter-linux` | Linux のサンドボックス（Landlock・seccomp・資源の上限。root で動かす場合は名前空間と pivot_root も）。起動役 `otas-sandbox-exec` を含む |
+| `otas-workspace` | 作業領域と正本の版管理。作業領域はコピーか OverlayFS、版はハードリンクか Btrfs の読み取り専用スナップショット。3者比較によるコミット、巻き戻し、ファイルを通じたラベルの伝播 |
 | `otas-models` | モデルのアダプタ。Claude API（Messages API）と OpenAI 互換 API（Ollama・llama.cpp などのローカルモデルを含む）。API キーはデーモンの中だけに置く |
 | `otas-state` | 状態の保存（ファイル・メモリ）。ブローカーと監督が再起動をまたいで続きから動けるようにする |
 | `otasd` | デーモン `otasd`、CLI `otas`、動作確認用のエージェント `otas-demo-agent` |
@@ -60,6 +60,14 @@ docker compose run --build --rm dev cargo fmt --all --check
 ```
 
 `docker compose` が使えない環境では `docker-compose` を使ってください。
+
+名前空間・OverlayFS・Btrfs を使う機能のテストは root と mount が必要なので、特権を足したテスト専用のサービスで動かします。普段の開発（`dev`）は特権なしのままです。
+
+```sh
+docker compose run --build --rm dev-privileged
+```
+
+このサービスは `privileged: true` で root として動き、`/tmp` に置いた Btrfs のイメージを loop デバイスでマウントしてから、すべてのテストを実行します（`scripts/test-privileged.sh`）。
 
 コンテナで作ったファイル（整形結果や `Cargo.lock`）をホストに戻すときは、名前付きのコンテナで実行してから `docker cp` で取り出します。
 

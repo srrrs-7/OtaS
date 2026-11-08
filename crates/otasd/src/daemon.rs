@@ -9,7 +9,7 @@ use otas_ipc::{ConsoleBackend, serve_console, verify_peer_uid};
 use otas_policy::DefaultPolicy;
 use otas_ports::{AuditError, Sandbox, StateStore, Workspace, WorkspaceError};
 use otas_state::FileStateStore;
-use otas_workspace::HardlinkStore;
+use otas_workspace::{FsStore, StoreOptions, ViewMode};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -33,6 +33,12 @@ pub enum DaemonError {
     /// タスクの状態を読み戻せない。
     #[error(transparent)]
     Supervisor(#[from] crate::supervisor::SupervisorError),
+    /// サンドボックスを使えない。
+    #[error(transparent)]
+    Sandbox(#[from] otas_ports::SandboxError),
+    /// 設定が不正。
+    #[error("設定が不正です: {0}")]
+    Config(String),
     /// モデルの設定が不正、または API キーが見つからない。
     #[error(transparent)]
     Model(#[from] otas_models::ModelConfigError),
@@ -46,7 +52,7 @@ pub struct Daemon {
     config: Config,
     broker: Arc<Broker>,
     supervisor: Rc<Supervisor>,
-    store: Arc<HardlinkStore>,
+    store: Arc<FsStore>,
 }
 
 impl Daemon {
@@ -59,7 +65,17 @@ impl Daemon {
         std::fs::set_permissions(&config.state_dir, std::fs::Permissions::from_mode(0o700))?;
 
         let audit = Arc::new(FileAuditLog::open(config.audit_log())?);
-        let store = Arc::new(HardlinkStore::open(config.store_dir())?);
+        // 名前空間のサンドボックスなら OverlayFS の作業領域（/data として見せる）、そうでなければコピー方式
+        let options = StoreOptions {
+            view: if sandbox.supports_mounts() {
+                ViewMode::Overlay
+            } else {
+                ViewMode::Copy
+            },
+            versions: config.data.versions,
+            owner: config.task_owner(),
+        };
+        let store = Arc::new(FsStore::open_with(config.store_dir(), options)?);
         for rule in &config.data.labels {
             store.add_labels(&rule.path, &rule.labels)?;
         }
@@ -142,6 +158,28 @@ impl Daemon {
             tokio::task::spawn_local(async move {
                 let _ = server.await;
             });
+        }
+    }
+}
+
+/// 設定に従ってサンドボックスを作る。
+pub fn sandbox_from_config(config: &Config) -> Result<Arc<dyn Sandbox>, DaemonError> {
+    use crate::config::SandboxMode;
+    use otas_adapter_linux::{LinuxSandbox, NamespaceConfig};
+    match config.sandbox.mode {
+        SandboxMode::Landlock => Ok(Arc::new(LinuxSandbox::detect(&config.launcher)?)),
+        SandboxMode::Namespace => {
+            let (uid, gid) = config.task_owner().ok_or_else(|| {
+                DaemonError::Config("namespace では [sandbox] の uid と gid が必要です".into())
+            })?;
+            Ok(Arc::new(LinuxSandbox::detect_namespaced(
+                &config.launcher,
+                NamespaceConfig {
+                    uid,
+                    gid,
+                    run_dir: config.run_dir(),
+                },
+            )?))
         }
     }
 }

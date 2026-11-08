@@ -28,6 +28,33 @@ pub struct FsRule {
     pub access: FsAccess,
 }
 
+/// サンドボックスの中に見せるものの出どころ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MountSource {
+    /// ホストのパス（ディレクトリまたはファイル）をそのまま見せる。
+    Path(PathBuf),
+    /// OverlayFS で重ねて見せる。`lower` は読み取り専用で、変更はすべて `upper` に入る。
+    Overlay {
+        /// 下の層（読み取り専用）。
+        lower: PathBuf,
+        /// 上の層（変更が入る）。
+        upper: PathBuf,
+        /// OverlayFS の作業用ディレクトリ（`upper` と同じファイルシステム）。
+        work: PathBuf,
+    },
+}
+
+/// サンドボックスの中の `target` に見せるもの（名前空間を使う実装だけが対応する）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mount {
+    /// サンドボックスの中のパス（例：`/data/projects/a`）。
+    pub target: PathBuf,
+    /// 出どころ。
+    pub source: MountSource,
+    /// 書き込めるか。
+    pub writable: bool,
+}
+
 /// ネットワークの扱い。
 ///
 /// タスクは外部と直接通信せず、通信はブローカー経由のツールが行う設計なので、現在は遮断だけを用意する。
@@ -63,7 +90,10 @@ pub struct SandboxSpec {
     /// 作業ディレクトリ。
     pub cwd: Option<PathBuf>,
     /// 許すファイルアクセス。書いていないパスには触れない。
+    /// 名前空間を使う実装では、同じパスでサンドボックスの中に見せる。
     pub fs: Vec<FsRule>,
+    /// サンドボックスの中の別のパスに見せるもの（[`Sandbox::supports_mounts`] が真の実装だけ）。
+    pub mounts: Vec<Mount>,
     /// ネットワークの扱い。
     pub net: NetPolicy,
     /// 資源の上限。
@@ -85,6 +115,7 @@ impl SandboxSpec {
             env: Vec::new(),
             cwd: None,
             fs: Vec::new(),
+            mounts: Vec::new(),
             net: NetPolicy::Deny,
             limits: ResourceLimits::default(),
             stdin: Stdio::null(),
@@ -161,6 +192,10 @@ pub trait SandboxProcess: Send {
 pub trait Sandbox: Send + Sync {
     /// この実装が保証できる範囲。
     fn guarantees(&self) -> Guarantees;
+    /// サンドボックスの中の別のパスに見せられるか（[`SandboxSpec::mounts`]、OverlayFS）。
+    fn supports_mounts(&self) -> bool {
+        false
+    }
     /// プロセスを起動する。
     fn spawn(&self, spec: SandboxSpec) -> Result<Box<dyn SandboxProcess>, SandboxError>;
 }

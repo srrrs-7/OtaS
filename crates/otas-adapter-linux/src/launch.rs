@@ -1,7 +1,8 @@
 //! 起動役の処理。自分自身に制限をかけてから対象のプログラムを exec する。
 
 use crate::landlock_rules;
-use crate::plan::{LaunchPlan, PlanLimits};
+use crate::namespace;
+use crate::plan::{LaunchPlan, PlanAccess, PlanFsRule, PlanLimits};
 use crate::seccomp_filter;
 use rustix::process::{Resource, Rlimit, Signal, set_parent_process_death_signal, setrlimit};
 use std::convert::Infallible;
@@ -45,10 +46,36 @@ pub fn exec_sandboxed(plan: &LaunchPlan) -> Result<Infallible, String> {
         return Err("プログラムは絶対パスで指定してください".into());
     }
 
-    set_parent_process_death_signal(Some(Signal::KILL))
-        .map_err(|e| format!("親の終了を検知する設定ができません: {e}"))?;
+    let death_signal = || {
+        set_parent_process_death_signal(Some(Signal::KILL))
+            .map_err(|e| format!("親の終了を検知する設定ができません: {e}"))
+    };
+    death_signal()?;
     apply_limits(&plan.limits)?;
-    landlock_rules::restrict_self(plan)?;
+
+    let mut rules = plan.fs.clone();
+    if let Some(ns) = &plan.namespace {
+        namespace::enter(ns, &plan.fs)?;
+        // ユーザーを切り替えると親の終了の検知が解除されるので、設定し直す
+        death_signal()?;
+        rules.push(PlanFsRule {
+            path: "/tmp".into(),
+            access: PlanAccess::ReadWrite,
+            optional: false,
+        });
+        for m in &ns.mounts {
+            rules.push(PlanFsRule {
+                path: m.target.clone(),
+                access: if m.writable {
+                    PlanAccess::ReadWrite
+                } else {
+                    PlanAccess::ReadOnly
+                },
+                optional: false,
+            });
+        }
+    }
+    landlock_rules::restrict_self(&rules, plan.deny_network)?;
     // seccomp は最後に適用する（それまでの処理で使うシステムコールを拒否しないように）
     let programs = seccomp_filter::build(plan.deny_network)?;
     seccomp_filter::apply(&programs)?;

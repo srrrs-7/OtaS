@@ -1,45 +1,82 @@
-//! OtaS の作業領域と版管理（ハードリンクによる、特権を使わない実装）。
+//! OtaS の作業領域と版管理。
 //!
 //! # 置き場所
 //!
 //! ```text
-//! <root>/live/              正本（論理パス /data に当たる）
-//! <root>/versions/<n>/      版 n（正本をハードリンクで丸ごと複製したもの）
-//! <root>/work/<task>/view/  タスクの作業領域（タスクから見える /data）
-//! <root>/work/<task>/meta.json
-//! <root>/meta/current       現在の版
-//! <root>/meta/labels.json   パスごとのラベル
+//! <root>/live/                 正本（論理パス /data に当たる）
+//! <root>/versions/<n>/         版 n
+//! <root>/work/<task>/          タスクの作業領域
+//! <root>/meta/current          現在の版
+//! <root>/meta/labels.json      パスごとのラベル
 //! ```
+//!
+//! # 方式（[`StoreOptions`]）
+//!
+//! | 項目 | 選択肢 | 特権 |
+//! |---|---|---|
+//! | 作業領域（[`ViewMode`]） | `Copy`：書き込み範囲はコピー、読み取り範囲はハードリンク | 不要 |
+//! |  | `Overlay`：書き込み範囲は OverlayFS（書いたときだけコピー）、読み取り範囲は版をそのまま見せる | 名前空間のサンドボックスが必要 |
+//! | 版（[`VersionBackend`]） | `Hardlink`：正本をハードリンクで丸ごと複製（保証 Weak） | 不要 |
+//! |  | `Btrfs`：読み取り専用のサブボリュームのスナップショット（保証 Strong） | Btrfs 上に置く。`Overlay` が必要 |
 //!
 //! # 安全性の要点
 //!
 //! - 正本を書き換えるのはコミットと巻き戻しだけで、どちらも「一時ファイルに書いてから置き換える」。
 //!   既存のファイルを上書きしないので、ハードリンクで共有している過去の版は壊れない。
-//! - 作業領域のうち書き込める範囲は本物のコピー、読み取りだけの範囲はハードリンクにする。
-//!   読み取りだけの範囲には、サンドボックス（Landlock）で書き込みを禁止する前提。
-//! - コミットでは作業領域のファイルを中身としてコピーし、シンボリックリンクなど通常のファイル以外は
-//!   拒否する（タスクが置いたリンクをデーモンがたどって、見せていないファイルを持ち出さないように）。
+//! - コミットでは作業領域のファイルを中身としてコピーし、シンボリックリンクなど通常のファイル以外は拒否する
+//!   （タスクが置いたリンクをデーモンがたどって、見せていないファイルを持ち出さないように）。
 //! - コミットは、元にした版・作業領域・現在の正本の3つを比べる。衝突があれば何も反映しない。
-//!
-//! # 保証
-//!
-//! 版の保証は Weak として申告する。カーネルが強制するスナップショットではなく、
-//! OtaS 以外のプロセスが正本のファイルをその場で書き換えると、ハードリンクを共有する版も変わるため。
-//! Btrfs のスナップショットと OverlayFS による実装は、同じ trait の別実装として追加する。
+//! - OverlayFS の上の層は、削除の印（whiteout）と、下の層を隠すディレクトリ（opaque）も変更として読む。
 
 use otas_ports::{
-    Change, ChangeKind, CommitOutcome, ViewEntry, ViewSpec, Workspace, WorkspaceError,
+    Change, ChangeKind, CommitOutcome, MountSource, ViewEntry, ViewSpec, Workspace, WorkspaceError,
     WorkspaceView,
 };
 use otas_types::{LabelSet, Level, TaskId};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 
 const DATA_ROOT: &str = "/data";
+
+/// 作業領域の方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewMode {
+    /// 書き込み範囲はコピー、読み取り範囲はハードリンク（特権不要）。
+    #[default]
+    Copy,
+    /// 書き込み範囲は OverlayFS、読み取り範囲は版をそのまま見せる（名前空間のサンドボックスが必要）。
+    Overlay,
+}
+
+/// 版の方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VersionBackend {
+    /// 正本をハードリンクで丸ごと複製する（保証 Weak）。
+    #[default]
+    Hardlink,
+    /// Btrfs の読み取り専用スナップショット（保証 Strong）。`btrfs` コマンドを使う。
+    Btrfs,
+}
+
+/// 置き場所の設定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StoreOptions {
+    /// 作業領域の方式。
+    pub view: ViewMode,
+    /// 版の方式。
+    pub versions: VersionBackend,
+    /// 正本と作業領域のファイルの所有者（uid, gid）。名前空間のサンドボックスでタスクを
+    /// このユーザーとして動かすときに指定する（デーモンは root で動く）。
+    pub owner: Option<(u32, u32)>,
+}
 
 /// 論理パス（`/data/...`）を、正本の根からの相対パスにする（`/data` 自体は空文字列）。
 fn relative(logical: &str) -> Result<String, WorkspaceError> {
@@ -79,6 +116,14 @@ fn join(base: &Path, rel: &str) -> PathBuf {
     }
 }
 
+fn join_rel(prefix: &str, rel: &str) -> String {
+    match (prefix.is_empty(), rel.is_empty()) {
+        (true, _) => rel.to_string(),
+        (_, true) => prefix.to_string(),
+        _ => format!("{prefix}/{rel}"),
+    }
+}
+
 /// `path` が `prefix` と同じか、その配下にあるか（相対パスどうし）。
 fn within(prefix: &str, path: &str) -> bool {
     prefix.is_empty()
@@ -97,46 +142,6 @@ fn unsupported(path: &Path) -> WorkspaceError {
         "{}（通常のファイルとディレクトリ以外は扱えません）",
         path.display()
     ))
-}
-
-/// ディレクトリを丸ごとコピーする（新しい実体を作る）。
-fn copy_tree(src: &Path, dst: &Path) -> Result<(), WorkspaceError> {
-    let meta = fs::symlink_metadata(src)?;
-    if meta.is_dir() {
-        fs::create_dir_all(dst)?;
-        for entry in fs::read_dir(src)? {
-            let entry = entry?;
-            copy_tree(&entry.path(), &dst.join(entry.file_name()))?;
-        }
-    } else if meta.is_file() {
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(src, dst)?;
-    } else {
-        return Err(unsupported(src));
-    }
-    Ok(())
-}
-
-/// ディレクトリを丸ごとハードリンクで複製する（実体は共有する）。
-fn link_tree(src: &Path, dst: &Path) -> Result<(), WorkspaceError> {
-    let meta = fs::symlink_metadata(src)?;
-    if meta.is_dir() {
-        fs::create_dir_all(dst)?;
-        for entry in fs::read_dir(src)? {
-            let entry = entry?;
-            link_tree(&entry.path(), &dst.join(entry.file_name()))?;
-        }
-    } else if meta.is_file() {
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::hard_link(src, dst)?;
-    } else {
-        return Err(unsupported(src));
-    }
-    Ok(())
 }
 
 fn remove_any(path: &Path) -> Result<(), WorkspaceError> {
@@ -167,16 +172,8 @@ fn list_files(base: &Path, rel: &str) -> Result<BTreeMap<String, PathBuf>, Works
             for entry in fs::read_dir(path)? {
                 let entry = entry?;
                 let name = entry.file_name();
-                let name = name
-                    .to_str()
-                    .ok_or_else(|| unsupported(&entry.path()))?
-                    .to_string();
-                let child = if rel.is_empty() {
-                    name
-                } else {
-                    format!("{rel}/{name}")
-                };
-                walk(&entry.path(), &child, out)?;
+                let name = name.to_str().ok_or_else(|| unsupported(&entry.path()))?;
+                walk(&entry.path(), &join_rel(rel, name), out)?;
             }
         } else {
             return Err(unsupported(path));
@@ -232,33 +229,97 @@ fn labels_for(map: &BTreeMap<String, LabelSet>, rel: &str) -> LabelSet {
     labels
 }
 
+/// OverlayFS の削除の印（whiteout）か：デバイス番号 0/0 のキャラクタデバイス。
+fn is_whiteout(meta: &fs::Metadata) -> bool {
+    meta.file_type().is_char_device() && meta.rdev() == 0
+}
+
+/// OverlayFS で、下の層の中身を隠すディレクトリ（opaque）か。
+fn is_opaque(path: &Path) -> bool {
+    let mut buf = [0u8; 8];
+    rustix::fs::lgetxattr(path, "trusted.overlay.opaque", &mut buf).is_ok_and(|n| &buf[..n] == b"y")
+}
+
+fn btrfs(args: &[&std::ffi::OsStr]) -> Result<(), WorkspaceError> {
+    let out = Command::new("btrfs")
+        .args(args)
+        .output()
+        .map_err(|e| WorkspaceError::Unsupported(format!("btrfs コマンドを実行できません: {e}")))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(WorkspaceError::Unsupported(format!(
+            "btrfs {} に失敗しました: {}",
+            args.iter()
+                .map(|a| a.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )))
+    }
+}
+
+/// 変更の1件（相対パス、種類、新しい中身の置き場所）。
+type Pending = (String, ChangeKind, Option<PathBuf>);
+
 #[derive(Debug, Serialize, Deserialize)]
 struct WorkMeta {
     base: u64,
     read: Vec<String>,
     write: Vec<String>,
+    #[serde(default)]
+    view: ViewMode,
 }
 
-/// ハードリンクによる作業領域と版管理。
+/// 作業領域と正本の版を、ファイルシステム上で管理する。
 #[derive(Debug)]
-pub struct HardlinkStore {
+pub struct FsStore {
     root: PathBuf,
+    options: StoreOptions,
     lock: Mutex<()>,
 }
 
-impl HardlinkStore {
-    /// 置き場所を開く（なければ作る）。最初に開いたときは、正本の今の状態を版 1 として取り込む。
+impl FsStore {
+    /// 特権を使わない既定の方式（コピーとハードリンク）で開く。
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, WorkspaceError> {
+        Self::open_with(root, StoreOptions::default())
+    }
+
+    /// 方式を指定して開く（なければ作る）。最初に開いたときは、正本の今の状態を版 1 として取り込む。
+    pub fn open_with(
+        root: impl Into<PathBuf>,
+        options: StoreOptions,
+    ) -> Result<Self, WorkspaceError> {
+        if options.versions == VersionBackend::Btrfs && options.view != ViewMode::Overlay {
+            return Err(WorkspaceError::Unsupported(
+                "Btrfs の版は OverlayFS の作業領域と組み合わせて使います（ハードリンクはサブボリュームをまたげないため）"
+                    .into(),
+            ));
+        }
         let root = root.into();
-        for dir in ["live", "versions", "work", "meta", "tmp"] {
+        for dir in ["versions", "work", "meta", "tmp"] {
             fs::create_dir_all(root.join(dir))?;
         }
         let store = Self {
             root,
+            options,
             lock: Mutex::new(()),
         };
+        let live = store.live_dir();
+        match options.versions {
+            VersionBackend::Hardlink => fs::create_dir_all(&live)?,
+            VersionBackend::Btrfs => {
+                if exists(&live) {
+                    // 既存の正本は Btrfs のサブボリュームでなければならない
+                    btrfs(&["subvolume".as_ref(), "show".as_ref(), live.as_os_str()])?;
+                } else {
+                    btrfs(&["subvolume".as_ref(), "create".as_ref(), live.as_os_str()])?;
+                }
+            }
+        }
+        store.own_tree(&live)?;
         if !store.current_path().exists() {
-            link_tree(&store.live_dir(), &store.version_dir(1))?;
+            store.snapshot(1)?;
             store.write_meta_file(&store.current_path(), b"1")?;
         }
         Ok(store)
@@ -305,15 +366,86 @@ impl HardlinkStore {
         self.root.join("meta").join("labels.json")
     }
 
-    fn temp_path(&self) -> PathBuf {
-        self.root
-            .join("tmp")
-            .join(TaskId::new().0.simple().to_string())
+    fn unique_name() -> String {
+        TaskId::new().0.simple().to_string()
     }
 
-    /// 一時ファイルに書いてから置き換える。
+    /// 所有者を設定していれば、そのユーザーのものにする。
+    fn own(&self, path: &Path) -> Result<(), WorkspaceError> {
+        if let Some((uid, gid)) = self.options.owner {
+            std::os::unix::fs::lchown(path, Some(uid), Some(gid))?;
+        }
+        Ok(())
+    }
+
+    fn own_tree(&self, path: &Path) -> Result<(), WorkspaceError> {
+        if self.options.owner.is_none() {
+            return Ok(());
+        }
+        self.own(path)?;
+        if fs::symlink_metadata(path)?.is_dir() {
+            for entry in fs::read_dir(path)? {
+                self.own_tree(&entry?.path())?;
+            }
+        }
+        Ok(())
+    }
+
+    fn create_dirs(&self, path: &Path) -> Result<(), WorkspaceError> {
+        if exists(path) {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            self.create_dirs(parent)?;
+        }
+        fs::create_dir(path)?;
+        self.own(path)
+    }
+
+    /// ディレクトリを丸ごとコピーする（新しい実体を作る）。
+    fn copy_tree(&self, src: &Path, dst: &Path) -> Result<(), WorkspaceError> {
+        let meta = fs::symlink_metadata(src)?;
+        if meta.is_dir() {
+            self.create_dirs(dst)?;
+            for entry in fs::read_dir(src)? {
+                let entry = entry?;
+                self.copy_tree(&entry.path(), &dst.join(entry.file_name()))?;
+            }
+        } else if meta.is_file() {
+            if let Some(parent) = dst.parent() {
+                self.create_dirs(parent)?;
+            }
+            fs::copy(src, dst)?;
+            self.own(dst)?;
+        } else {
+            return Err(unsupported(src));
+        }
+        Ok(())
+    }
+
+    /// ディレクトリを丸ごとハードリンクで複製する（実体は共有する）。
+    fn link_tree(&self, src: &Path, dst: &Path) -> Result<(), WorkspaceError> {
+        let meta = fs::symlink_metadata(src)?;
+        if meta.is_dir() {
+            self.create_dirs(dst)?;
+            for entry in fs::read_dir(src)? {
+                let entry = entry?;
+                self.link_tree(&entry.path(), &dst.join(entry.file_name()))?;
+            }
+        } else if meta.is_file() {
+            if let Some(parent) = dst.parent() {
+                self.create_dirs(parent)?;
+            }
+            fs::hard_link(src, dst)?;
+        } else {
+            return Err(unsupported(src));
+        }
+        Ok(())
+    }
+
+    /// 一時ファイルに書いてから置き換える（管理用のファイル）。
     fn write_meta_file(&self, path: &Path, bytes: &[u8]) -> Result<(), WorkspaceError> {
-        let tmp = self.temp_path();
+        let tmp = self.root.join("tmp").join(Self::unique_name());
         fs::write(&tmp, bytes)?;
         fs::rename(&tmp, path)?;
         Ok(())
@@ -354,12 +486,30 @@ impl HardlinkStore {
             .map_err(|e| WorkspaceError::Corrupt(format!("作業領域の情報を読めません: {e}")))
     }
 
-    /// 作業領域の変更（相対パス）。
-    fn changes(
-        &self,
-        task: TaskId,
-        meta: &WorkMeta,
-    ) -> Result<Vec<(String, ChangeKind)>, WorkspaceError> {
+    /// 正本の今の状態を版 `n` として残す。
+    fn snapshot(&self, n: u64) -> Result<(), WorkspaceError> {
+        let target = self.version_dir(n);
+        match self.options.versions {
+            VersionBackend::Hardlink => self.link_tree(&self.live_dir(), &target),
+            VersionBackend::Btrfs => btrfs(&[
+                "subvolume".as_ref(),
+                "snapshot".as_ref(),
+                "-r".as_ref(),
+                self.live_dir().as_os_str(),
+                target.as_os_str(),
+            ]),
+        }
+    }
+
+    fn snapshot_live(&self) -> Result<u64, WorkspaceError> {
+        let next = self.read_current()? + 1;
+        self.snapshot(next)?;
+        self.write_meta_file(&self.current_path(), next.to_string().as_bytes())?;
+        Ok(next)
+    }
+
+    /// コピー方式の変更（作業領域と元の版の差分）。
+    fn copy_changes(&self, task: TaskId, meta: &WorkMeta) -> Result<Vec<Pending>, WorkspaceError> {
         let base = self.version_dir(meta.base);
         let view = self.work_dir(task).join("view");
         let mut out = BTreeMap::new();
@@ -369,34 +519,112 @@ impl HardlinkStore {
             for (path, file) in &after {
                 match before.get(path) {
                     None => {
-                        out.insert(path.clone(), ChangeKind::Added);
+                        out.insert(path.clone(), (ChangeKind::Added, Some(file.clone())));
                     }
                     Some(old) if !same(Some(old), Some(file))? => {
-                        out.insert(path.clone(), ChangeKind::Modified);
+                        out.insert(path.clone(), (ChangeKind::Modified, Some(file.clone())));
                     }
                     Some(_) => {}
                 }
             }
             for path in before.keys() {
                 if !after.contains_key(path) {
-                    out.insert(path.clone(), ChangeKind::Deleted);
+                    out.insert(path.clone(), (ChangeKind::Deleted, None));
                 }
             }
         }
-        Ok(out.into_iter().collect())
+        Ok(out.into_iter().map(|(p, (k, s))| (p, k, s)).collect())
     }
 
-    fn snapshot_live(&self) -> Result<u64, WorkspaceError> {
-        let next = self.read_current()? + 1;
-        link_tree(&self.live_dir(), &self.version_dir(next))?;
-        self.write_meta_file(&self.current_path(), next.to_string().as_bytes())?;
-        Ok(next)
+    /// OverlayFS 方式の変更（上の層を読む）。
+    fn overlay_changes(
+        &self,
+        task: TaskId,
+        meta: &WorkMeta,
+    ) -> Result<Vec<Pending>, WorkspaceError> {
+        let base = self.version_dir(meta.base);
+        let dir = self.work_dir(task);
+        let mut out: BTreeMap<String, (ChangeKind, Option<PathBuf>)> = BTreeMap::new();
+
+        fn delete_under(
+            base: &Path,
+            rel: &str,
+            keep: &BTreeSet<String>,
+            out: &mut BTreeMap<String, (ChangeKind, Option<PathBuf>)>,
+        ) -> Result<(), WorkspaceError> {
+            for path in list_files(base, rel)?.into_keys() {
+                if !keep.contains(&path) {
+                    out.insert(path, (ChangeKind::Deleted, None));
+                }
+            }
+            Ok(())
+        }
+
+        /// 上の層を歩く。見つけた通常のファイルの相対パスを返す。
+        fn walk(
+            upper: &Path,
+            rel: &str,
+            base: &Path,
+            out: &mut BTreeMap<String, (ChangeKind, Option<PathBuf>)>,
+        ) -> Result<BTreeSet<String>, WorkspaceError> {
+            let mut files = BTreeSet::new();
+            for entry in fs::read_dir(upper)? {
+                let entry = entry?;
+                let path = entry.path();
+                let name = entry.file_name();
+                let name = name.to_str().ok_or_else(|| unsupported(&path))?;
+                let child = join_rel(rel, name);
+                let meta = fs::symlink_metadata(&path)?;
+                if meta.is_file() {
+                    let before = regular(&join(base, &child)).unwrap_or(None);
+                    match &before {
+                        Some(old) if same(Some(old), Some(&path))? => {}
+                        Some(_) => {
+                            out.insert(child.clone(), (ChangeKind::Modified, Some(path.clone())));
+                        }
+                        None => {
+                            out.insert(child.clone(), (ChangeKind::Added, Some(path.clone())));
+                        }
+                    }
+                    files.insert(child);
+                } else if is_whiteout(&meta) {
+                    // 削除の印：元の版にあったファイル（ディレクトリならその中身すべて）を削除する
+                    delete_under(base, &child, &BTreeSet::new(), out)?;
+                } else if meta.is_dir() {
+                    let inner = walk(&path, &child, base, out)?;
+                    if is_opaque(&path) {
+                        // 下の層を隠すディレクトリ：上の層にないファイルは削除された
+                        delete_under(base, &child, &inner, out)?;
+                    }
+                    files.extend(inner);
+                } else {
+                    return Err(unsupported(&path));
+                }
+            }
+            Ok(files)
+        }
+
+        for (i, w) in meta.write.iter().enumerate() {
+            let upper = dir.join("upper").join(i.to_string());
+            walk(&upper, w, &base, &mut out)?;
+        }
+        Ok(out.into_iter().map(|(p, (k, s))| (p, k, s)).collect())
+    }
+
+    fn changes(&self, task: TaskId, meta: &WorkMeta) -> Result<Vec<Pending>, WorkspaceError> {
+        match meta.view {
+            ViewMode::Copy => self.copy_changes(task, meta),
+            ViewMode::Overlay => self.overlay_changes(task, meta),
+        }
     }
 }
 
-impl Workspace for HardlinkStore {
+impl Workspace for FsStore {
     fn snapshot_level(&self) -> Level {
-        Level::Weak
+        match self.options.versions {
+            VersionBackend::Hardlink => Level::Weak,
+            VersionBackend::Btrfs => Level::Strong,
+        }
     }
 
     fn current_version(&self) -> Result<u64, WorkspaceError> {
@@ -439,45 +667,103 @@ impl Workspace for HardlinkStore {
         }
         let base = self.read_current()?;
         let base_dir = self.version_dir(base);
-        let root = dir.join("view");
-        fs::create_dir_all(&root)?;
         let labels = self.load_labels()?;
+        fs::create_dir_all(&dir)?;
 
         let mut entries = Vec::new();
-        for r in &read {
-            let (src, dst) = (join(&base_dir, r), join(&root, r));
-            if exists(&src) {
-                link_tree(&src, &dst)?;
-            } else {
-                fs::create_dir_all(&dst)?;
+        let root = dir.join("view");
+        match self.options.view {
+            ViewMode::Copy => {
+                self.create_dirs(&root)?;
+                for r in &read {
+                    let (src, dst) = (join(&base_dir, r), join(&root, r));
+                    if exists(&src) {
+                        self.link_tree(&src, &dst)?;
+                    } else {
+                        self.create_dirs(&dst)?;
+                    }
+                    entries.push(ViewEntry {
+                        logical: logical(r),
+                        source: MountSource::Path(dst),
+                        writable: false,
+                        labels: labels_for(&labels, r),
+                    });
+                }
+                for w in &write {
+                    let (src, dst) = (join(&base_dir, w), join(&root, w));
+                    // 読み取り専用の範囲の中にある場合は、ハードリンクを外して本物のコピーに置き換える
+                    remove_any(&dst)?;
+                    if exists(&src) {
+                        self.copy_tree(&src, &dst)?;
+                    } else {
+                        self.create_dirs(&dst)?;
+                    }
+                    entries.push(ViewEntry {
+                        logical: logical(w),
+                        source: MountSource::Path(dst),
+                        writable: true,
+                        labels: labels_for(&labels, w),
+                    });
+                }
+                // 作業領域の根が消えていたら作り直す（/data 全体を書き込み範囲にした場合）
+                self.create_dirs(&root)?;
             }
-            entries.push(ViewEntry {
-                logical: logical(r),
-                physical: dst,
-                writable: false,
-                labels: labels_for(&labels, r),
-            });
-        }
-        for w in &write {
-            let (src, dst) = (join(&base_dir, w), join(&root, w));
-            // 読み取り専用の範囲の中にある場合は、ハードリンクを外して本物のコピーに置き換える
-            remove_any(&dst)?;
-            if exists(&src) {
-                copy_tree(&src, &dst)?;
-            } else {
-                fs::create_dir_all(&dst)?;
+            ViewMode::Overlay => {
+                // 元の版にない範囲は、空のディレクトリを下の層にする
+                let empty = dir.join("empty");
+                fs::create_dir_all(&empty)?;
+                self.own(&empty)?;
+                for r in &read {
+                    let src = join(&base_dir, r);
+                    entries.push(ViewEntry {
+                        logical: logical(r),
+                        source: MountSource::Path(if exists(&src) { src } else { empty.clone() }),
+                        writable: false,
+                        labels: labels_for(&labels, r),
+                    });
+                }
+                for (i, w) in write.iter().enumerate() {
+                    let lower = join(&base_dir, w);
+                    let lower = match fs::symlink_metadata(&lower) {
+                        Ok(m) if m.is_dir() => lower,
+                        Ok(_) => {
+                            return Err(WorkspaceError::InvalidPath(format!(
+                                "{}（OverlayFS の書き込み範囲はディレクトリで指定してください）",
+                                logical(w)
+                            )));
+                        }
+                        Err(_) => {
+                            // 読み取り範囲の中に入れ子にする場合、マウント先が元の版に存在している必要がある
+                            if read.iter().any(|r| within(r, w)) {
+                                return Err(WorkspaceError::InvalidPath(format!(
+                                    "{}（読み取り範囲の中に、元の版にない書き込み範囲は作れません）",
+                                    logical(w)
+                                )));
+                            }
+                            empty.clone()
+                        }
+                    };
+                    let upper = dir.join("upper").join(i.to_string());
+                    let work = dir.join("ovl").join(i.to_string());
+                    fs::create_dir_all(&upper)?;
+                    fs::create_dir_all(&work)?;
+                    self.own(&upper)?;
+                    entries.push(ViewEntry {
+                        logical: logical(w),
+                        source: MountSource::Overlay { lower, upper, work },
+                        writable: true,
+                        labels: labels_for(&labels, w),
+                    });
+                }
             }
-            entries.push(ViewEntry {
-                logical: logical(w),
-                physical: dst,
-                writable: true,
-                labels: labels_for(&labels, w),
-            });
         }
-        // 作業領域の根が消えていたら作り直す（/data 全体を書き込み範囲にした場合）
-        fs::create_dir_all(&root)?;
 
-        let meta = WorkMeta { base, read, write };
+        let meta = WorkMeta {
+            base,
+            read,
+            write,
+            view: self.options.view,
+        };
         let bytes =
             serde_json::to_vec(&meta).map_err(|e| WorkspaceError::Corrupt(e.to_string()))?;
         fs::write(dir.join("meta.json"), bytes)?;
@@ -495,7 +781,7 @@ impl Workspace for HardlinkStore {
         Ok(self
             .changes(task, &meta)?
             .into_iter()
-            .map(|(path, kind)| Change {
+            .map(|(path, kind, _)| Change {
                 path: logical(&path),
                 kind,
             })
@@ -514,17 +800,15 @@ impl Workspace for HardlinkStore {
 
         let live = self.live_dir();
         let base = self.version_dir(meta.base);
-        let view = dir.join("view");
 
         // 3者比較：正本が元の版から変わっていないか、作業領域と同じ内容になっていれば反映してよい
         let mut conflicts = Vec::new();
-        for (path, _) in &changes {
+        for (path, _, after) in &changes {
             let Ok(now) = regular(&live.join(path)) else {
                 conflicts.push(logical(path));
                 continue;
             };
             let before = regular(&base.join(path))?;
-            let after = regular(&view.join(path))?;
             if !(same(now.as_deref(), before.as_deref())?
                 || same(now.as_deref(), after.as_deref())?)
             {
@@ -535,19 +819,21 @@ impl Workspace for HardlinkStore {
             return Ok(CommitOutcome::Conflict { paths: conflicts });
         }
 
-        for (path, kind) in &changes {
+        for (path, kind, after) in &changes {
             let target = live.join(path);
-            match kind {
-                ChangeKind::Added | ChangeKind::Modified => {
+            match (kind, after) {
+                (ChangeKind::Added | ChangeKind::Modified, Some(source)) => {
                     if let Some(parent) = target.parent() {
-                        fs::create_dir_all(parent)?;
+                        self.create_dirs(parent)?;
                     }
-                    // 既存のファイルは上書きせず、新しい実体に置き換える（過去の版を壊さない）
-                    let tmp = self.temp_path();
-                    fs::copy(view.join(path), &tmp)?;
+                    // 既存のファイルは上書きせず、新しい実体に置き換える（過去の版を壊さない）。
+                    // 一時ファイルは正本の中に作る（Btrfs のサブボリュームをまたぐ rename はできないため）
+                    let tmp = live.join(format!(".otas-tmp-{}", Self::unique_name()));
+                    fs::copy(source, &tmp)?;
+                    self.own(&tmp)?;
                     fs::rename(&tmp, &target)?;
                 }
-                ChangeKind::Deleted => match fs::remove_file(&target) {
+                _ => match fs::remove_file(&target) {
                     Ok(()) => {}
                     Err(e) if e.kind() == ErrorKind::NotFound => {}
                     Err(e) => return Err(e.into()),
@@ -556,7 +842,7 @@ impl Workspace for HardlinkStore {
         }
 
         let mut map = self.load_labels()?;
-        for (path, kind) in &changes {
+        for (path, kind, _) in &changes {
             match kind {
                 ChangeKind::Deleted => {
                     map.remove(path);
@@ -572,7 +858,7 @@ impl Workspace for HardlinkStore {
             version,
             changes: changes
                 .into_iter()
-                .map(|(path, kind)| Change {
+                .map(|(path, kind, _)| Change {
                     path: logical(&path),
                     kind,
                 })
@@ -596,12 +882,28 @@ impl Workspace for HardlinkStore {
         if !exists(&src) {
             return Err(WorkspaceError::NoSuchVersion(to));
         }
-        let staged = self.temp_path();
-        link_tree(&src, &staged)?;
-        let old = self.temp_path();
-        fs::rename(self.live_dir(), &old)?;
-        fs::rename(&staged, self.live_dir())?;
-        fs::remove_dir_all(&old)?;
+        let staged = self.root.join("tmp").join(Self::unique_name());
+        let old = self.root.join("tmp").join(Self::unique_name());
+        match self.options.versions {
+            VersionBackend::Hardlink => {
+                self.link_tree(&src, &staged)?;
+                fs::rename(self.live_dir(), &old)?;
+                fs::rename(&staged, self.live_dir())?;
+                fs::remove_dir_all(&old)?;
+            }
+            VersionBackend::Btrfs => {
+                // 読み取り専用の版から、書き込めるスナップショットを作って正本と入れ替える
+                btrfs(&[
+                    "subvolume".as_ref(),
+                    "snapshot".as_ref(),
+                    src.as_os_str(),
+                    staged.as_os_str(),
+                ])?;
+                fs::rename(self.live_dir(), &old)?;
+                fs::rename(&staged, self.live_dir())?;
+                btrfs(&["subvolume".as_ref(), "delete".as_ref(), old.as_os_str()])?;
+            }
+        }
         // ラベルは巻き戻さない（多めに付いている分には安全側）
         self.snapshot_live()
     }
@@ -614,7 +916,7 @@ mod tests {
 
     struct Fixture {
         root: PathBuf,
-        store: HardlinkStore,
+        store: FsStore,
     }
 
     impl Drop for Fixture {
@@ -631,7 +933,7 @@ mod tests {
         fs::create_dir_all(live.join("mail")).unwrap();
         fs::write(live.join("projects/a/notes.md"), "v1").unwrap();
         fs::write(live.join("mail/1.eml"), "secret").unwrap();
-        let store = HardlinkStore::open(&root).unwrap();
+        let store = FsStore::open(&root).unwrap();
         Fixture { root, store }
     }
 
@@ -646,11 +948,33 @@ mod tests {
         fs::read_to_string(f.store.live_dir().join(rel)).ok()
     }
 
+    fn path_of(entry: &ViewEntry) -> PathBuf {
+        match &entry.source {
+            MountSource::Path(p) => p.clone(),
+            other => panic!("コピー方式なのにパス以外: {other:?}"),
+        }
+    }
+
     #[test]
     fn opening_imports_the_current_data_as_version_one() {
         let f = fixture();
         assert_eq!(f.store.current_version().unwrap(), 1);
         assert_eq!(f.store.versions().unwrap(), vec![1]);
+        assert_eq!(f.store.snapshot_level(), Level::Weak);
+    }
+
+    #[test]
+    fn btrfs_requires_overlay() {
+        let root = std::env::temp_dir().join(format!("otas-ws-{}", TaskId::new()));
+        let r = FsStore::open_with(
+            &root,
+            StoreOptions {
+                view: ViewMode::Copy,
+                versions: VersionBackend::Btrfs,
+                owner: None,
+            },
+        );
+        assert!(matches!(r, Err(WorkspaceError::Unsupported(_))));
     }
 
     #[test]
@@ -694,6 +1018,13 @@ mod tests {
             f.store.diff(task),
             Err(WorkspaceError::NotFound(_))
         ));
+        // 一時ファイルは残らない
+        assert!(fs::read_dir(f.store.live_dir()).unwrap().all(|e| {
+            !e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".otas-tmp")
+        }));
     }
 
     #[test]
@@ -845,10 +1176,10 @@ mod tests {
             .store
             .begin(task, &view(&["/data"], &["/data/projects/a"]))
             .unwrap();
-        // 書き込み範囲のファイルは、正本とは別の実体
-        use std::os::unix::fs::MetadataExt;
-        let in_view = fs::metadata(v.root.join("projects/a/notes.md")).unwrap();
+        let written = v.entries.iter().find(|e| e.writable).unwrap();
+        let in_view = fs::metadata(path_of(written).join("notes.md")).unwrap();
         let in_live = fs::metadata(f.store.live_dir().join("projects/a/notes.md")).unwrap();
+        // 書き込み範囲のファイルは、正本とは別の実体
         assert_ne!(in_view.ino(), in_live.ino());
         // 読み取り範囲のファイルはハードリンク（実体を共有。書き込みはサンドボックスが禁止する）
         let mail_view = fs::metadata(v.root.join("mail/1.eml")).unwrap();
@@ -863,5 +1194,48 @@ mod tests {
             let r = f.store.begin(TaskId::new(), &view(&[bad], &[]));
             assert!(matches!(r, Err(WorkspaceError::InvalidPath(_))), "{bad}");
         }
+    }
+
+    #[test]
+    fn overlay_views_point_at_the_version_and_the_upper_layer() {
+        let root = std::env::temp_dir().join(format!("otas-ws-{}", TaskId::new()));
+        fs::create_dir_all(root.join("live/projects/a")).unwrap();
+        fs::create_dir_all(root.join("live/mail")).unwrap();
+        let store = FsStore::open_with(
+            &root,
+            StoreOptions {
+                view: ViewMode::Overlay,
+                ..StoreOptions::default()
+            },
+        )
+        .unwrap();
+        let task = TaskId::new();
+        let v = store
+            .begin(
+                task,
+                &view(&["/data/mail"], &["/data/projects/a", "/data/new"]),
+            )
+            .unwrap();
+        // 読み取り範囲は版をそのまま見せる（コピーしない）
+        assert_eq!(
+            v.entries[0].source,
+            MountSource::Path(root.join("versions/1/mail"))
+        );
+        // 書き込み範囲は、版を下の層にした OverlayFS
+        match &v.entries[1].source {
+            MountSource::Overlay { lower, upper, .. } => {
+                assert_eq!(lower, &root.join("versions/1/projects/a"));
+                assert!(upper.is_dir());
+            }
+            other => panic!("{other:?}"),
+        }
+        // 版にない範囲は空のディレクトリが下の層
+        match &v.entries[2].source {
+            MountSource::Overlay { lower, .. } => assert!(lower.ends_with("empty")),
+            other => panic!("{other:?}"),
+        }
+        // マウントしていなければ上の層は空なので、変更はない
+        assert!(store.diff(task).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 }

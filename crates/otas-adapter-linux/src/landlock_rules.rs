@@ -1,6 +1,6 @@
 //! Landlock によるファイルと TCP の制限。
 
-use crate::plan::{LaunchPlan, PlanAccess};
+use crate::plan::{PlanAccess, PlanFsRule};
 use landlock::{
     ABI, Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd,
     Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus,
@@ -36,13 +36,13 @@ pub(crate) fn probe() -> Result<(), String> {
 }
 
 /// 自分自身に制限をかける。完全に適用できなければエラーにする（中途半端な状態では動かさない）。
-pub(crate) fn restrict_self(plan: &LaunchPlan) -> Result<(), String> {
+pub(crate) fn restrict_self(rules: &[PlanFsRule], deny_network: bool) -> Result<(), String> {
     let abi = REQUIRED_ABI;
     let mut ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)
         .handle_access(AccessFs::from_all(abi))
         .map_err(|e| e.to_string())?;
-    if plan.deny_network {
+    if deny_network {
         // 許可する TCP ポートの規則を1つも足さないので、bind と connect はすべて拒否される
         ruleset = ruleset
             .handle_access(AccessNet::from_all(abi))
@@ -50,7 +50,7 @@ pub(crate) fn restrict_self(plan: &LaunchPlan) -> Result<(), String> {
     }
     let mut created = ruleset.create().map_err(|e| e.to_string())?;
 
-    for rule in &plan.fs {
+    for rule in rules {
         let metadata = match std::fs::metadata(&rule.path) {
             Ok(m) => m,
             Err(_) if rule.optional => continue,

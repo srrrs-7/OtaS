@@ -80,4 +80,51 @@ pub struct LaunchPlan {
     pub deny_network: bool,
     /// 資源の上限。
     pub limits: PlanLimits,
+    /// 名前空間を使う場合の計画（使わなければ `None`）。
+    #[serde(default)]
+    pub namespace: Option<NamespacePlan>,
+}
+
+/// 名前空間の中に見せるものの出どころ。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlanMountSource {
+    /// ホストのパスをそのまま見せる（bind mount）。
+    Bind {
+        /// ホストのパス。
+        path: PathBuf,
+    },
+    /// OverlayFS で重ねて見せる。
+    Overlay {
+        /// 下の層（読み取り専用）。
+        lower: PathBuf,
+        /// 上の層（変更が入る）。
+        upper: PathBuf,
+        /// 作業用ディレクトリ。
+        work: PathBuf,
+    },
+}
+
+/// 名前空間の中の `target` に見せるもの。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanMount {
+    /// 名前空間の中のパス。
+    pub target: PathBuf,
+    /// 出どころ。
+    pub source: PlanMountSource,
+    /// 書き込めるか。
+    pub writable: bool,
+}
+
+/// 名前空間を使う場合の計画（起動役は root で動き、準備が終わったら `uid` / `gid` に切り替える）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespacePlan {
+    /// 新しいルートを組み立てる空のディレクトリ（ホストのパス）。
+    pub root: PathBuf,
+    /// タスクを動かすユーザー。
+    pub uid: u32,
+    /// タスクを動かすグループ。
+    pub gid: u32,
+    /// 別のパスに見せるもの（`fs` の規則は同じパスで見せる）。
+    pub mounts: Vec<PlanMount>,
 }

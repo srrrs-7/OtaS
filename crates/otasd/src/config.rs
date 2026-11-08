@@ -26,6 +26,9 @@ pub struct Config {
     /// ポリシーの設定。
     #[serde(default)]
     pub policy: PolicyConfig,
+    /// サンドボックスの設定。
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
     /// データ（正本）の設定。
     #[serde(default)]
     pub data: DataConfig,
@@ -37,10 +40,40 @@ pub struct Config {
     pub demo: DemoConfig,
 }
 
+/// サンドボックスの方式。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxMode {
+    /// Landlock と seccomp だけ（特権不要）。作業領域はコピー方式で、`OTAS_DATA` の場所に見える。
+    #[default]
+    Landlock,
+    /// 名前空間も使う（デーモンを root で動かす）。作業領域は OverlayFS で、`/data` として見える。
+    Namespace,
+}
+
+/// サンドボックスの設定。
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxConfig {
+    /// 方式。
+    #[serde(default)]
+    pub mode: SandboxMode,
+    /// `namespace` のとき、タスクを動かすユーザー（0 以外。データの所有者にもなる）。
+    #[serde(default)]
+    pub uid: Option<u32>,
+    /// `namespace` のとき、タスクを動かすグループ（0 以外）。
+    #[serde(default)]
+    pub gid: Option<u32>,
+}
+
 /// データ（正本）の設定。
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DataConfig {
+    /// 版の方式（`hardlink` か `btrfs`）。`btrfs` は `state_dir` を Btrfs 上に置き、
+    /// サンドボックスを `namespace` にする必要がある。
+    #[serde(default)]
+    pub versions: otas_workspace::VersionBackend,
     /// 範囲ごとのラベル。その範囲を作業領域に見せたタスクは、このラベルを持つ。
     #[serde(default)]
     pub labels: Vec<LabelRule>,
@@ -124,6 +157,19 @@ impl Config {
     pub fn store_dir(&self) -> PathBuf {
         self.state_dir.join("store")
     }
+
+    /// 名前空間のサンドボックスが、タスクごとの新しいルートを組み立てるディレクトリ。
+    pub fn run_dir(&self) -> PathBuf {
+        self.state_dir.join("run")
+    }
+
+    /// `namespace` のときのタスクのユーザーとグループ。
+    pub fn task_owner(&self) -> Option<(u32, u32)> {
+        match self.sandbox.mode {
+            SandboxMode::Landlock => None,
+            SandboxMode::Namespace => Some((self.sandbox.uid?, self.sandbox.gid?)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -193,6 +239,26 @@ mod tests {
         .unwrap();
         assert_eq!(c.models.len(), 2);
         assert_eq!(c.models[1].id, "local");
+    }
+
+    #[test]
+    fn sandbox_and_versions_are_read() {
+        let c = Config::from_toml(
+            r#"
+            state_dir = "/x"
+            launcher = "/y"
+            [sandbox]
+            mode = "namespace"
+            uid = 1000
+            gid = 1000
+            [data]
+            versions = "btrfs"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.sandbox.mode, SandboxMode::Namespace);
+        assert_eq!(c.task_owner(), Some((1000, 1000)));
+        assert_eq!(c.data.versions, otas_workspace::VersionBackend::Btrfs);
     }
 
     #[test]

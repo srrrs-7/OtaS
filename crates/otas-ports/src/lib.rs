@@ -12,8 +12,8 @@ mod state;
 mod workspace;
 
 pub use sandbox::{
-    ExitInfo, FsAccess, FsRule, NetPolicy, ResourceLimits, Sandbox, SandboxError, SandboxProcess,
-    SandboxSpec,
+    ExitInfo, FsAccess, FsRule, Mount, MountSource, NetPolicy, ResourceLimits, Sandbox,
+    SandboxError, SandboxProcess, SandboxSpec,
 };
 pub use state::{StateError, StateStore};
 pub use workspace::{

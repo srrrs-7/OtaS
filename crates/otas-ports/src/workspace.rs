@@ -6,6 +6,7 @@
 //!
 //! パスは正本上の論理パス（`/data/...`）で表す。物理的な置き場所は実装が決める。
 
+use crate::MountSource;
 use otas_types::{LabelSet, Level, TaskId};
 use std::path::PathBuf;
 
@@ -23,8 +24,8 @@ pub struct ViewSpec {
 pub struct ViewEntry {
     /// 正本上の論理パス。
     pub logical: String,
-    /// タスクから見える物理パス。
-    pub physical: PathBuf,
+    /// 出どころ。コピーやハードリンクなら [`MountSource::Path`]、OverlayFS なら [`MountSource::Overlay`]。
+    pub source: MountSource,
     /// 書き込めるか。
     pub writable: bool,
     /// この範囲のデータに付いているラベル。

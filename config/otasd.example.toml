@@ -17,6 +17,20 @@ net_isolation = "strong"
 syscall_filter = "weak"
 snapshot = "absent"
 
+# サンドボックスの方式。
+#   landlock  : Landlock と seccomp だけ（特権不要）。作業領域はコピー方式で、OTAS_DATA の場所に見える
+#   namespace : 名前空間も使う（otasd を root で動かす）。作業領域は OverlayFS で /data として見え、
+#               それ以外のパス（/etc/passwd など）はサンドボックスの中に存在しない。タスクは uid/gid で動く
+[sandbox]
+mode = "landlock"
+# uid = 1000
+# gid = 1000
+
+# 版の方式。hardlink（既定、保証 Weak）か btrfs（読み取り専用スナップショット、保証 Strong）。
+# btrfs は state_dir を Btrfs 上に置き、store/live をサブボリュームとして用意し、sandbox を namespace にする。
+[data]
+versions = "hardlink"
+
 # 範囲ごとのラベル。その範囲を作業領域に見せたタスクは、このラベルを持つ。
 # 正本は state_dir/store/live にあり、論理パス /data として扱う。
 [[data.labels]]

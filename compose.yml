@@ -5,6 +5,9 @@
 #   docker compose run --build --rm dev cargo clippy --workspace --all-targets -- -D warnings
 #   docker compose run --build --rm dev cargo fmt --all --check
 #
+# 名前空間・OverlayFS・Btrfs を使うテストは、特権を足した別のサービスで動かす（明示したときだけ）:
+#   docker compose run --build --rm dev-privileged
+#
 # ホストのディレクトリはマウントしない。使うのはキャッシュ用の名前付きボリュームだけ。
 name: otas
 
@@ -26,5 +29,22 @@ services:
     tmpfs:
       - /tmp
 
+  # 特権を足したテスト専用のサービス。名前空間・OverlayFS・Btrfs（loop デバイス）を使うテストのために
+  # root と privileged が必要。開発の普段使いには使わない。キャッシュは root 用に分ける
+  # （dev サービスのキャッシュに root のファイルが混ざらないように）。
+  dev-privileged:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: otas-dev:local
+    user: root
+    privileged: true
+    volumes:
+      - cargo-cache-root:/cache
+    tmpfs:
+      - /tmp
+    command: ["sh", "/workspace/scripts/test-privileged.sh"]
+
 volumes:
   cargo-cache:
+  cargo-cache-root:

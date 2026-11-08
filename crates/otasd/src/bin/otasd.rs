@@ -10,7 +10,6 @@ use std::process::ExitCode;
 #[cfg(target_os = "linux")]
 fn main() -> ExitCode {
     use otasd::{Config, Daemon};
-    use std::sync::Arc;
 
     let args: Vec<String> = std::env::args().collect();
     let config_path = match args.as_slice() {
@@ -27,7 +26,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let sandbox = match otas_adapter_linux::LinuxSandbox::detect(&config.launcher) {
+    let sandbox = match otasd::sandbox_from_config(&config) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("otasd: {e}");
@@ -47,7 +46,7 @@ fn main() -> ExitCode {
     };
     let result = tokio::task::LocalSet::new().block_on(&runtime, async move {
         let socket = config.console_socket();
-        let daemon = Daemon::new(config, Arc::new(sandbox))?;
+        let daemon = Daemon::new(config, sandbox)?;
         let listener = daemon.bind()?;
         eprintln!("otasd: {} で待ち受けています", socket.display());
         tokio::select! {

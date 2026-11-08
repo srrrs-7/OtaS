@@ -19,8 +19,12 @@ serde_json.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
 libc = "0.2"
+nix = { version = "0.31", features = ["mount", "sched", "user", "fs"] }
 rustix = { version = "1", features = ["process"] }
 seccompiler = "0.5"
+
+[dev-dependencies]
+otas-types.workspace = true
 
 [lints]
 workspace = true

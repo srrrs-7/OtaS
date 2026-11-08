@@ -15,6 +15,13 @@
 //!
 //! どれも特権を必要としないので、権限をすべて外したコンテナの中でも使える。
 //!
+//! # 名前空間を使う方式（[`LinuxSandbox::detect_namespaced`]）
+//!
+//! デーモンが root で動く場合は、上の制限の前に名前空間を作り、許可したものだけを置いた
+//! 新しいルートに移ってから一般ユーザーに切り替える（`namespace` モジュール）。
+//! 許可していないパスはサンドボックスの中に存在せず、作業領域は `/data` として見える。
+//! OverlayFS の作業領域（書いたときだけコピー）もこの方式で使える。
+//!
 //! # 保証の申告
 //!
 //! - ファイルの隔離：Strong（Landlock がカーネルで強制する）
@@ -28,10 +35,13 @@
 
 mod landlock_rules;
 mod launch;
+mod namespace;
 mod plan;
 mod sandbox;
 mod seccomp_filter;
 
 pub use launch::exec_sandboxed;
-pub use plan::{LaunchPlan, PlanAccess, PlanFsRule, PlanLimits};
-pub use sandbox::{LAUNCHER_FAILURE_EXIT_CODE, LinuxSandbox};
+pub use plan::{
+    LaunchPlan, NamespacePlan, PlanAccess, PlanFsRule, PlanLimits, PlanMount, PlanMountSource,
+};
+pub use sandbox::{LAUNCHER_FAILURE_EXIT_CODE, LinuxSandbox, NamespaceConfig};

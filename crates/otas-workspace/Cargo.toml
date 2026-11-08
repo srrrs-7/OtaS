@@ -9,8 +9,12 @@ rust-version.workspace = true
 [dependencies]
 otas-ports.workspace = true
 otas-types.workspace = true
+rustix = { version = "1", features = ["fs"] }
 serde.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+nix = { version = "0.31", features = ["mount"] }
 
 [lints]
 workspace = true

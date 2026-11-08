@@ -7,7 +7,7 @@ FROM rust:1.99-slim-bookworm
 LABEL org.otas.dev="true"
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends capnproto pkg-config ca-certificates git \
+    && apt-get install -y --no-install-recommends capnproto pkg-config ca-certificates git btrfs-progs \
     && rm -rf /var/lib/apt/lists/* \
     && rustup component add clippy rustfmt
 

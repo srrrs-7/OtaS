@@ -18,5 +18,5 @@ pub mod demo;
 pub mod supervisor;
 
 pub use config::Config;
-pub use daemon::{Daemon, DaemonError};
+pub use daemon::{Daemon, DaemonError, sandbox_from_config};
 pub use supervisor::{Supervisor, SupervisorError, TaskRequest, TaskStatus};

@@ -3,9 +3,9 @@
 use otas_broker::{Broker, BrokerError, CallResult};
 use otas_ipc::{ConsoleBackend, Sessions, serve_task};
 use otas_ports::{
-    Change, ChangeKind, CommitOutcome, FsAccess, FsRule, NetPolicy, ResourceLimits, Sandbox,
-    SandboxError, SandboxSpec, StateError, StateStore, ViewSpec, Workspace, WorkspaceError,
-    WorkspaceView,
+    Change, ChangeKind, CommitOutcome, FsAccess, FsRule, Mount, MountSource, NetPolicy,
+    ResourceLimits, Sandbox, SandboxError, SandboxSpec, StateError, StateStore, ViewSpec,
+    Workspace, WorkspaceError, WorkspaceView,
 };
 use otas_types::{Grant, GrantSet, TaskId};
 use serde::{Deserialize, Serialize};
@@ -191,15 +191,54 @@ pub fn view_spec(grants: &GrantSet) -> ViewSpec {
     view
 }
 
-/// 作業領域から、サンドボックスで見せるファイルの規則を作る。プログラム自体は読み取りと実行を許す。
-pub fn fs_rules(view: &WorkspaceView, program: &Path) -> Vec<FsRule> {
-    let mut rules = vec![FsRule {
+/// サンドボックスへの見せ方。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Layout {
+    /// 同じパスで見せるもの（Landlock の規則にもなる）。
+    pub fs: Vec<FsRule>,
+    /// 別のパスに見せるもの（名前空間のサンドボックスだけ）。
+    pub mounts: Vec<Mount>,
+    /// エージェントから見た作業領域の根（`OTAS_DATA`）。
+    pub data_root: PathBuf,
+}
+
+/// 作業領域を、サンドボックスにどう見せるかを決める。プログラム自体は読み取りと実行を許す。
+///
+/// - 名前空間のサンドボックス（`mounts_supported`）なら、作業領域を `/data` 以下にそのまま見せる
+/// - そうでなければ、作業領域のホストのパスを Landlock で許す（OverlayFS の作業領域は使えない）
+pub fn layout(
+    view: &WorkspaceView,
+    program: &Path,
+    mounts_supported: bool,
+) -> Result<Layout, SupervisorError> {
+    let mut fs = vec![FsRule {
         path: program.to_path_buf(),
         access: FsAccess::ReadExec,
     }];
+    if mounts_supported {
+        let mounts = view
+            .entries
+            .iter()
+            .map(|entry| Mount {
+                target: PathBuf::from(&entry.logical),
+                source: entry.source.clone(),
+                writable: entry.writable,
+            })
+            .collect();
+        return Ok(Layout {
+            fs,
+            mounts,
+            data_root: PathBuf::from("/data"),
+        });
+    }
     for entry in &view.entries {
-        rules.push(FsRule {
-            path: entry.physical.clone(),
+        let MountSource::Path(path) = &entry.source else {
+            return Err(SupervisorError::InvalidState(
+                "OverlayFS の作業領域には、名前空間を使うサンドボックスが必要です".into(),
+            ));
+        };
+        fs.push(FsRule {
+            path: path.clone(),
             access: if entry.writable {
                 FsAccess::ReadWrite
             } else {
@@ -207,7 +246,11 @@ pub fn fs_rules(view: &WorkspaceView, program: &Path) -> Vec<FsRule> {
             },
         });
     }
-    rules
+    Ok(Layout {
+        fs,
+        mounts: Vec::new(),
+        data_root: view.root.clone(),
+    })
 }
 
 fn change_json(change: &Change) -> Value {
@@ -378,10 +421,12 @@ impl Supervisor {
         let stdout = File::create(dir.join("stdout.log"))?;
         let stderr = File::create(dir.join("stderr.log"))?;
 
+        let layout = layout(view, &request.program, self.sandbox.supports_mounts())?;
         let mut env = request.env;
-        env.push((DATA_ENV.into(), view.root.display().to_string()));
+        env.push((DATA_ENV.into(), layout.data_root.display().to_string()));
         let spec = SandboxSpec {
-            fs: fs_rules(view, &request.program),
+            fs: layout.fs,
+            mounts: layout.mounts,
             program: request.program,
             args: request.args,
             env,
@@ -582,24 +627,53 @@ mod tests {
             entries: vec![
                 ViewEntry {
                     logical: "/data/mail".into(),
-                    physical: "/state/work/t/view/mail".into(),
+                    source: MountSource::Path("/state/work/t/view/mail".into()),
                     writable: false,
                     labels: LabelSet::empty(),
                 },
                 ViewEntry {
                     logical: "/data/projects/a".into(),
-                    physical: "/state/work/t/view/projects/a".into(),
+                    source: MountSource::Path("/state/work/t/view/projects/a".into()),
                     writable: true,
                     labels: LabelSet::empty(),
                 },
             ],
         };
-        let rules = fs_rules(&view, Path::new("/usr/libexec/agent"));
-        assert_eq!(rules.len(), 3);
-        assert_eq!(rules[0].access, FsAccess::ReadExec);
-        assert_eq!(rules[1].access, FsAccess::ReadOnly);
-        assert_eq!(rules[2].access, FsAccess::ReadWrite);
-        assert_eq!(rules[2].path, Path::new("/state/work/t/view/projects/a"));
+        // Landlock だけのサンドボックス：ホストのパスを許す
+        let l = layout(&view, Path::new("/usr/libexec/agent"), false).unwrap();
+        assert_eq!(l.fs.len(), 3);
+        assert_eq!(l.fs[0].access, FsAccess::ReadExec);
+        assert_eq!(l.fs[1].access, FsAccess::ReadOnly);
+        assert_eq!(l.fs[2].access, FsAccess::ReadWrite);
+        assert_eq!(l.fs[2].path, Path::new("/state/work/t/view/projects/a"));
+        assert_eq!(l.data_root, Path::new("/state/work/t/view"));
+
+        // 名前空間のサンドボックス：/data 以下にそのまま見せる
+        let n = layout(&view, Path::new("/usr/libexec/agent"), true).unwrap();
+        assert_eq!(n.fs.len(), 1);
+        assert_eq!(n.mounts[1].target, Path::new("/data/projects/a"));
+        assert!(n.mounts[1].writable);
+        assert_eq!(n.data_root, Path::new("/data"));
+    }
+
+    #[test]
+    fn overlay_needs_a_namespace_sandbox() {
+        let view = WorkspaceView {
+            root: "/state/work/t/view".into(),
+            base_version: 1,
+            entries: vec![ViewEntry {
+                logical: "/data/projects/a".into(),
+                source: MountSource::Overlay {
+                    lower: "/l".into(),
+                    upper: "/u".into(),
+                    work: "/w".into(),
+                },
+                writable: true,
+                labels: LabelSet::empty(),
+            }],
+        };
+        assert!(layout(&view, Path::new("/bin/agent"), false).is_err());
+        assert!(layout(&view, Path::new("/bin/agent"), true).is_ok());
     }
 
     #[test]

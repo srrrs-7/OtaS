@@ -1,9 +1,12 @@
 //! [`Sandbox`] の Linux 実装。
 
 use crate::landlock_rules;
-use crate::plan::{LaunchPlan, PlanAccess, PlanFsRule};
-use otas_ports::{ExitInfo, NetPolicy, Sandbox, SandboxError, SandboxProcess, SandboxSpec};
-use otas_types::{Guarantees, Level};
+use crate::plan::{LaunchPlan, NamespacePlan, PlanAccess, PlanFsRule, PlanMount, PlanMountSource};
+use otas_ports::{
+    ExitInfo, MountSource, NetPolicy, Sandbox, SandboxError, SandboxProcess, SandboxSpec,
+};
+use otas_types::{Guarantees, Level, TaskId};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 
@@ -38,11 +41,23 @@ fn is_clean_absolute(path: &Path) -> bool {
             .all(|c| matches!(c, Component::RootDir | Component::Normal(_)))
 }
 
-/// Landlock と seccomp によるサンドボックス。
+/// 名前空間を使う方式の設定。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceConfig {
+    /// タスクを動かすユーザー（0 以外）。
+    pub uid: u32,
+    /// タスクを動かすグループ（0 以外）。
+    pub gid: u32,
+    /// タスクごとの新しいルートを組み立てるディレクトリ。
+    pub run_dir: PathBuf,
+}
+
+/// Landlock と seccomp によるサンドボックス（名前空間を使う方式も選べる）。
 #[derive(Debug, Clone)]
 pub struct LinuxSandbox {
     launcher: PathBuf,
     system: Vec<PlanFsRule>,
+    namespace: Option<NamespaceConfig>,
 }
 
 impl LinuxSandbox {
@@ -59,7 +74,32 @@ impl LinuxSandbox {
         Ok(Self {
             launcher,
             system: system_rules(),
+            namespace: None,
         })
+    }
+
+    /// 名前空間を使う方式で作る。デーモンが root で動いている必要がある。
+    pub fn detect_namespaced(
+        launcher: impl Into<PathBuf>,
+        config: NamespaceConfig,
+    ) -> Result<Self, SandboxError> {
+        let mut sandbox = Self::detect(launcher)?;
+        if !rustix::process::getuid().is_root() {
+            return Err(SandboxError::Unsupported(
+                "名前空間を使う方式は、デーモンを root で動かす必要があります".into(),
+            ));
+        }
+        if config.uid == 0 || config.gid == 0 {
+            return Err(SandboxError::InvalidSpec(
+                "タスクを root として動かすことはできません（uid と gid は 0 以外）".into(),
+            ));
+        }
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&config.run_dir)?;
+        sandbox.namespace = Some(config);
+        Ok(sandbox)
     }
 
     fn plan(&self, spec: &SandboxSpec) -> Result<LaunchPlan, SandboxError> {
@@ -83,6 +123,44 @@ impl LinuxSandbox {
                 optional: false,
             });
         }
+        let namespace = match &self.namespace {
+            None if !spec.mounts.is_empty() => {
+                return Err(SandboxError::InvalidSpec(
+                    "このサンドボックスは別のパスに見せること（mounts）に対応していません".into(),
+                ));
+            }
+            None => None,
+            Some(config) => {
+                let mut mounts = Vec::new();
+                for m in &spec.mounts {
+                    if !is_clean_absolute(&m.target) || m.target == Path::new("/") {
+                        return Err(SandboxError::InvalidSpec(format!(
+                            "マウント先は `..` を含まない絶対パスで指定してください: {}",
+                            m.target.display()
+                        )));
+                    }
+                    let source = match &m.source {
+                        MountSource::Path(path) => PlanMountSource::Bind { path: path.clone() },
+                        MountSource::Overlay { lower, upper, work } => PlanMountSource::Overlay {
+                            lower: lower.clone(),
+                            upper: upper.clone(),
+                            work: work.clone(),
+                        },
+                    };
+                    mounts.push(PlanMount {
+                        target: m.target.clone(),
+                        source,
+                        writable: m.writable,
+                    });
+                }
+                Some(NamespacePlan {
+                    root: config.run_dir.join(TaskId::new().0.simple().to_string()),
+                    uid: config.uid,
+                    gid: config.gid,
+                    mounts,
+                })
+            }
+        };
         Ok(LaunchPlan {
             program: spec.program.clone(),
             args: spec.args.clone(),
@@ -91,6 +169,7 @@ impl LinuxSandbox {
             fs,
             deny_network: matches!(spec.net, NetPolicy::Deny),
             limits: spec.limits.into(),
+            namespace,
         })
     }
 }
@@ -105,8 +184,20 @@ impl Sandbox for LinuxSandbox {
         }
     }
 
+    fn supports_mounts(&self) -> bool {
+        self.namespace.is_some()
+    }
+
     fn spawn(&self, spec: SandboxSpec) -> Result<Box<dyn SandboxProcess>, SandboxError> {
         let plan = self.plan(&spec)?;
+        // 新しいルートを組み立てる空のディレクトリ。名前空間が消えれば空に戻るので、終了後に消す
+        let cleanup = match &plan.namespace {
+            Some(ns) => {
+                std::fs::DirBuilder::new().mode(0o700).create(&ns.root)?;
+                Some(ns.root.clone())
+            }
+            None => None,
+        };
         let plan =
             serde_json::to_string(&plan).map_err(|e| SandboxError::InvalidSpec(e.to_string()))?;
         let child = Command::new(&self.launcher)
@@ -117,12 +208,21 @@ impl Sandbox for LinuxSandbox {
             .stdout(spec.stdout)
             .stderr(spec.stderr)
             .spawn()?;
-        Ok(Box::new(LinuxProcess { child }))
+        Ok(Box::new(LinuxProcess { child, cleanup }))
     }
 }
 
 struct LinuxProcess {
     child: Child,
+    cleanup: Option<PathBuf>,
+}
+
+impl LinuxProcess {
+    fn finished(&mut self) {
+        if let Some(dir) = self.cleanup.take() {
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
 }
 
 fn exit_info(status: ExitStatus) -> ExitInfo {
@@ -139,11 +239,17 @@ impl SandboxProcess for LinuxProcess {
     }
 
     fn wait(&mut self) -> Result<ExitInfo, SandboxError> {
-        Ok(exit_info(self.child.wait()?))
+        let info = exit_info(self.child.wait()?);
+        self.finished();
+        Ok(info)
     }
 
     fn try_wait(&mut self) -> Result<Option<ExitInfo>, SandboxError> {
-        Ok(self.child.try_wait()?.map(exit_info))
+        let info = self.child.try_wait()?.map(exit_info);
+        if info.is_some() {
+            self.finished();
+        }
+        Ok(info)
     }
 
     fn kill(&mut self) -> Result<(), SandboxError> {
