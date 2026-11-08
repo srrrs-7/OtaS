@@ -1,0 +1,20 @@
+[package]
+name = "otas-testkit"
+description = "OtaS のテスト用の偽実装（ツール・モデル）と、標準構成のブローカー"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+otas-audit.workspace = true
+otas-broker.workspace = true
+otas-policy.workspace = true
+otas-ports.workspace = true
+otas-types.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

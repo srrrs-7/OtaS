@@ -1,0 +1,222 @@
+//! クライアント側（タスクや人間向けの画面が使う）。
+
+use crate::IpcError;
+use crate::convert::{label_to_wire, read_labels, role_to_wire, text};
+use crate::otas_capnp::{approver, call_result, task_session};
+use capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty};
+use otas_ports::InferRequest;
+use otas_types::{Action, ApprovalId, GrantSet, LabelSet, TaskId};
+use tokio::net::UnixStream;
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+
+/// 操作の結果。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Remote<T> {
+    /// 実行が終わった。
+    Done(T),
+    /// 人間の承認を待っている。
+    Pending(ApprovalId),
+    /// 拒否された（理由つき）。
+    Denied(String),
+}
+
+impl<T> Remote<T> {
+    /// 承認待ちなら ID を返す。
+    pub fn pending(&self) -> Option<ApprovalId> {
+        match self {
+            Remote::Pending(id) => Some(*id),
+            _ => None,
+        }
+    }
+}
+
+fn parse_uuid(s: &str) -> Result<uuid::Uuid, IpcError> {
+    uuid::Uuid::parse_str(s).map_err(|e| IpcError::Protocol(format!("ID が不正です: {e}")))
+}
+
+fn read_result(reader: call_result::Reader<'_>) -> Result<Remote<serde_json::Value>, IpcError> {
+    match reader
+        .which()
+        .map_err(|e| IpcError::Protocol(format!("{e:?}")))?
+    {
+        call_result::Which::Done(t) => Ok(Remote::Done(serde_json::from_str(&text(t?)?)?)),
+        call_result::Which::Pending(t) => Ok(Remote::Pending(ApprovalId(parse_uuid(&text(t?)?)?))),
+        call_result::Which::Denied(t) => Ok(Remote::Denied(text(t?)?)),
+    }
+}
+
+/// 接続の上で RPC を動かし、相手が公開した最初のケイパビリティを返す。
+/// `LocalSet` の中で呼ぶ必要がある。
+fn bootstrap<C: capnp::capability::FromClientHook>(stream: UnixStream) -> C {
+    let (reader, writer) = stream.into_split();
+    let network = twoparty::VatNetwork::new(
+        futures::io::BufReader::new(reader.compat()),
+        futures::io::BufWriter::new(writer.compat_write()),
+        rpc_twoparty_capnp::Side::Client,
+        Default::default(),
+    );
+    let mut rpc = RpcSystem::new(Box::new(network), None);
+    let client = rpc.bootstrap(rpc_twoparty_capnp::Side::Server);
+    tokio::task::spawn_local(rpc);
+    client
+}
+
+/// タスクの窓口に接続する。`LocalSet` の中で呼ぶ必要がある。
+pub fn connect_task(stream: UnixStream) -> TaskClient {
+    TaskClient {
+        cap: bootstrap(stream),
+    }
+}
+
+/// 承認の窓口に接続する。`LocalSet` の中で呼ぶ必要がある。
+pub fn connect_approver(stream: UnixStream) -> ApproverClient {
+    ApproverClient {
+        cap: bootstrap(stream),
+    }
+}
+
+/// タスクの窓口。この窓口からの操作は、常に窓口に紐づいたタスクとして扱われる。
+#[derive(Clone)]
+pub struct TaskClient {
+    cap: task_session::Client,
+}
+
+impl TaskClient {
+    /// ツールを呼ぶ。
+    pub async fn call_tool(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<Remote<serde_json::Value>, IpcError> {
+        let mut req = self.cap.call_tool_request();
+        req.get().set_name(name);
+        req.get().set_args_json(serde_json::to_string(args)?);
+        let response = req.send().promise.await?;
+        read_result(response.get()?.get_result()?)
+    }
+
+    /// モデルで推論する。完了した場合は応答の本文を返す。
+    pub async fn infer(
+        &self,
+        model: &str,
+        request: &InferRequest,
+    ) -> Result<Remote<String>, IpcError> {
+        let mut req = self.cap.infer_request();
+        {
+            let mut p = req.get();
+            p.set_model(model);
+            p.set_max_tokens(request.max_tokens);
+            let mut list = p.init_messages(request.messages.len() as u32);
+            for (i, m) in request.messages.iter().enumerate() {
+                let mut b = list.reborrow().get(i as u32);
+                b.set_role(role_to_wire(m.role));
+                b.set_content(&m.content);
+            }
+        }
+        let response = req.send().promise.await?;
+        Ok(match read_result(response.get()?.get_result()?)? {
+            Remote::Done(v) => Remote::Done(
+                v.as_str()
+                    .ok_or_else(|| IpcError::Protocol("推論の結果が文字列ではありません".into()))?
+                    .to_string(),
+            ),
+            Remote::Pending(id) => Remote::Pending(id),
+            Remote::Denied(r) => Remote::Denied(r),
+        })
+    }
+
+    /// データの読み取りを判定する。
+    pub async fn read_data(&self, path: &str, labels: &LabelSet) -> Result<Remote<()>, IpcError> {
+        let mut req = self.cap.read_data_request();
+        {
+            let mut p = req.get();
+            p.set_path(path);
+            let mut list = p.init_labels(labels.iter().count() as u32);
+            for (i, l) in labels.iter().enumerate() {
+                list.set(i as u32, label_to_wire(l));
+            }
+        }
+        let response = req.send().promise.await?;
+        Ok(match read_result(response.get()?.get_result()?)? {
+            Remote::Done(_) => Remote::Done(()),
+            Remote::Pending(id) => Remote::Pending(id),
+            Remote::Denied(r) => Remote::Denied(r),
+        })
+    }
+
+    /// タスクが積み上げたラベル。
+    pub async fn labels(&self) -> Result<LabelSet, IpcError> {
+        let response = self.cap.labels_request().send().promise.await?;
+        Ok(read_labels(response.get()?.get_labels()?)?)
+    }
+
+    /// 子タスクを作り、その窓口を返す。権限は親の範囲内に限られる。
+    pub async fn delegate(&self, grants: &GrantSet) -> Result<TaskClient, IpcError> {
+        let mut req = self.cap.delegate_request();
+        req.get().set_grants_json(serde_json::to_string(grants)?);
+        let response = req.send().promise.await?;
+        Ok(TaskClient {
+            cap: response.get()?.get_child()?,
+        })
+    }
+
+    /// 子タスクのラベルを取り込む。
+    pub async fn absorb(&self, child: &TaskClient) -> Result<(), IpcError> {
+        let mut req = self.cap.absorb_request();
+        req.get().set_child(child.cap.clone());
+        req.send().promise.await?;
+        Ok(())
+    }
+}
+
+/// 承認待ちの1件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingItem {
+    /// 承認待ちの ID。
+    pub id: ApprovalId,
+    /// 要求したタスク。
+    pub task: TaskId,
+    /// 要求された操作。
+    pub action: Action,
+    /// 承認が必要な理由。
+    pub reason: String,
+}
+
+/// 承認の窓口。人間向けの画面だけが持つ。
+#[derive(Clone)]
+pub struct ApproverClient {
+    cap: approver::Client,
+}
+
+impl ApproverClient {
+    /// 承認待ちの一覧。
+    pub async fn pending(&self) -> Result<Vec<PendingItem>, IpcError> {
+        let response = self.cap.pending_request().send().promise.await?;
+        let mut items = Vec::new();
+        for item in response.get()?.get_items()?.iter() {
+            items.push(PendingItem {
+                id: ApprovalId(parse_uuid(&text(item.get_id()?)?)?),
+                task: TaskId(parse_uuid(&text(item.get_task()?)?)?),
+                action: serde_json::from_str(&text(item.get_action()?)?)?,
+                reason: text(item.get_reason()?)?,
+            });
+        }
+        Ok(items)
+    }
+
+    /// 承認して実行する。完了した場合は結果（JSON）を返す。
+    pub async fn approve(&self, id: ApprovalId) -> Result<Remote<serde_json::Value>, IpcError> {
+        let mut req = self.cap.approve_request();
+        req.get().set_id(id.0.to_string());
+        let response = req.send().promise.await?;
+        read_result(response.get()?.get_result()?)
+    }
+
+    /// 却下する。
+    pub async fn reject(&self, id: ApprovalId) -> Result<(), IpcError> {
+        let mut req = self.cap.reject_request();
+        req.get().set_id(id.0.to_string());
+        req.send().promise.await?;
+        Ok(())
+    }
+}

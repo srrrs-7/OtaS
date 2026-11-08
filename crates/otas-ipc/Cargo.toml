@@ -1,0 +1,32 @@
+[package]
+name = "otas-ipc"
+description = "OtaS の IPC 層（Cap'n Proto RPC）。権限をケイパビリティとして渡す"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+capnp.workspace = true
+capnp-rpc.workspace = true
+futures.workspace = true
+otas-broker.workspace = true
+otas-ports.workspace = true
+otas-types.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "rt"] }
+tokio-util = { workspace = true, features = ["compat"] }
+uuid.workspace = true
+
+[build-dependencies]
+capnpc.workspace = true
+
+[dev-dependencies]
+otas-audit.workspace = true
+otas-policy.workspace = true
+otas-testkit.workspace = true
+tokio = { workspace = true, features = ["net", "rt", "macros"] }
+
+[lints]
+workspace = true
